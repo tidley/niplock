@@ -10,7 +10,15 @@ dirs = "6.0.0"
 nostr-sdk = { version = "0.44.1", features = ["all-nips"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
-tokio = { version = "1.52.1", features = ["macros", "rt-multi-thread", "signal", "time"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.20", features = ["fmt", "env-filter"] }
-uuid = { version = "1.18.1", features = ["serde", "v4"] }
+uuid = { version = "1.18.1", features = ["serde", "v4", "js"] }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tokio = { version = "1.52.1", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+gloo-events = "0.2.0"
+wasm-bindgen-futures = "0.4.55"
+web-sys = { version = "0.3.82", features = ["Document", "HtmlInputElement", "Window", "Storage"] }
+yew = { version = "0.21.0", features = ["csr"] }

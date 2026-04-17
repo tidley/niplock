@@ -1,18 +1,12 @@
-mod app;
-mod model;
-mod nostr_sync;
-mod store;
-mod ui;
-
 use std::sync::Arc;
 
 use anyhow::Result;
-use app::PasswdApp;
 use nostr_sdk::prelude::*;
-use store::LocalStore;
+use passwd::app::PasswdApp;
+use passwd::store::LocalStore;
+use passwd::ui::SyncIndicator;
 use tokio::time::{Duration, sleep};
 use tracing::{error, info};
-use ui::SyncIndicator;
 
 const DEFAULT_RELAYS: [&str; 2] = ["wss://nip17.tomdwyer.uk", "wss://nip17.com"];
 

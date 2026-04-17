@@ -7,4 +7,6 @@
   - Repo initialized.
   - Rust project scaffold created.
   - NIP-17 relay defaults configured.
-  - Startup/shutdown sync flow implemented.
+  - Startup/shutdown sync flow implemented for native binary.
+  - Web-first WASM GUI implemented (`passwd-web`) with CRUD + corner sync indicator.
+  - Web lifecycle sync hooks implemented (`startup`, `visibilitychange`, `pagehide`).
