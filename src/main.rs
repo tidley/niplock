@@ -12,7 +12,7 @@ use passwd::store::LocalStore;
 #[cfg(not(target_arch = "wasm32"))]
 use passwd::ui::SyncIndicator;
 #[cfg(not(target_arch = "wasm32"))]
-use tokio::time::{sleep, Duration};
+use tokio::time::{Duration, sleep};
 #[cfg(not(target_arch = "wasm32"))]
 use tracing::{error, info};
 
