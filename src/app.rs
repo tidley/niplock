@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use chrono::Utc;
-use nostr_sdk::prelude::Keys;
+use nostr_sdk::prelude::NostrSigner;
 use tokio::sync::Mutex;
 use tracing::{error, info};
 
@@ -20,12 +20,12 @@ pub struct PasswdApp {
 
 impl PasswdApp {
     pub async fn new(
-        keys: Keys,
+        signer: Arc<dyn NostrSigner>,
         relays: Vec<String>,
         store: LocalStore,
         indicator: Arc<SyncIndicator>,
     ) -> Result<Self> {
-        let sync = NostrSync::new(keys, relays).await?;
+        let sync = NostrSync::new_with_signer(signer, relays).await?;
         Ok(Self {
             store,
             sync,

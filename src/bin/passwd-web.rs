@@ -10,9 +10,8 @@ mod web {
     use chrono::Utc;
     use gloo_events::EventListener;
     use js_sys::Math;
-    use nostr_sdk::prelude::Keys;
     use passwd::model::PasswordEntry;
-    use passwd::nostr_sync::NostrSync;
+    use passwd::nostr_sync::{NostrSync, signer_from_input};
     use uuid::Uuid;
     use wasm_bindgen_futures::{JsFuture, spawn_local};
     use web_sys::{HtmlInputElement, HtmlTextAreaElement, window};
@@ -562,7 +561,7 @@ body {
             let sync_state = sync_state.clone();
             let last_sync = last_sync.clone();
             let sync_in_flight = sync_in_flight.clone();
-            Callback::from(move |_| match Keys::parse(unlock_input.trim()) {
+            Callback::from(move |_| match signer_from_input(unlock_input.trim()) {
                 Ok(_) => {
                     nsec.set(unlock_input.trim().to_string());
                     unlocked.set(true);
@@ -577,7 +576,7 @@ body {
                     );
                 }
                 Err(err) => {
-                    unlock_error.set(Some(format!("Invalid nsec: {err}")));
+                    unlock_error.set(Some(format!("Invalid signer credential: {err}")));
                 }
             })
         };
@@ -849,7 +848,7 @@ body {
                             if *unlock_panel_open {
                                 <div class="unlock-panel">
                                     <div style="font-weight:700; margin-bottom:8px;">{"Unlock Vault Sync"}</div>
-                                    <input class="input" type="password" placeholder="nsec1..." value={(*unlock_input).clone()} oninput={on_unlock_input} />
+                                    <input class="input" type="password" placeholder="nsec1... or bunker://..." value={(*unlock_input).clone()} oninput={on_unlock_input} />
                                     if let Some(err) = &*unlock_error {
                                         <div style="color: var(--err); margin-top: 8px; font-size: 0.85rem;">{err.clone()}</div>
                                     }
@@ -1348,7 +1347,7 @@ body {
     }
 
     fn render_settings_page(
-        nsec: String,
+        signer_credential: String,
         unlocked: bool,
         sync_label: String,
         last_sync: Option<String>,
@@ -1374,7 +1373,9 @@ body {
                 <div class="section" style="margin-top:12px;">
                     <div class="detail-label">{"Nostr Credentials"}</div>
                     <div class="muted">{"Loaded in session only"}</div>
-                    <div style="margin-top:8px; font-family: monospace;">{if nsec.is_empty() { "(not loaded)".to_string() } else { "nsec••••••••••••••••".to_string() }}</div>
+                    <div style="margin-top:8px; font-family: monospace;">
+                        {if signer_credential.is_empty() { "(not loaded)".to_string() } else { "signer••••••••••••••••".to_string() }}
+                    </div>
                     if let Some(ts) = last_sync {
                         <div class="muted" style="margin-top:8px;">{format!("Last sync: {ts}")}</div>
                     }
@@ -1453,7 +1454,7 @@ body {
     }
 
     fn spawn_sync(
-        nsec: UseStateHandle<String>,
+        signer_credential: UseStateHandle<String>,
         entries: UseStateHandle<Vec<PasswordEntry>>,
         sync_state: UseStateHandle<SyncState>,
         last_sync: UseStateHandle<Option<String>>,
@@ -1467,34 +1468,36 @@ body {
         sync_state.set(SyncState::Syncing);
 
         spawn_local(async move {
-            if nsec.trim().is_empty() {
+            if signer_credential.trim().is_empty() {
                 sync_state.set(SyncState::Error(
-                    "set nsec to enable NIP-17 sync".to_string(),
+                    "set signer credential to enable NIP-17 sync".to_string(),
                 ));
                 sync_in_flight.set(false);
                 return;
             }
 
-            let keys = match Keys::parse(nsec.trim()) {
+            let signer = match signer_from_input(signer_credential.trim()) {
                 Ok(v) => v,
                 Err(err) => {
-                    sync_state.set(SyncState::Error(format!("invalid nsec: {err}")));
+                    sync_state.set(SyncState::Error(format!("invalid signer: {err}")));
                     sync_in_flight.set(false);
                     return;
                 }
             };
 
-            let sync =
-                match NostrSync::new(keys, DEFAULT_RELAYS.iter().map(|r| r.to_string()).collect())
-                    .await
-                {
-                    Ok(v) => v,
-                    Err(err) => {
-                        sync_state.set(SyncState::Error(format!("relay connect failed: {err}")));
-                        sync_in_flight.set(false);
-                        return;
-                    }
-                };
+            let sync = match NostrSync::new_with_signer(
+                signer,
+                DEFAULT_RELAYS.iter().map(|r| r.to_string()).collect(),
+            )
+            .await
+            {
+                Ok(v) => v,
+                Err(err) => {
+                    sync_state.set(SyncState::Error(format!("relay connect failed: {err}")));
+                    sync_in_flight.set(false);
+                    return;
+                }
+            };
 
             let local = to_map(&entries);
             match sync.sync(&local).await {

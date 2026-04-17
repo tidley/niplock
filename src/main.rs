@@ -4,9 +4,9 @@ use std::sync::Arc;
 #[cfg(not(target_arch = "wasm32"))]
 use anyhow::Result;
 #[cfg(not(target_arch = "wasm32"))]
-use nostr_sdk::prelude::*;
-#[cfg(not(target_arch = "wasm32"))]
 use passwd::app::PasswdApp;
+#[cfg(not(target_arch = "wasm32"))]
+use passwd::nostr_sync::signer_from_input;
 #[cfg(not(target_arch = "wasm32"))]
 use passwd::store::LocalStore;
 #[cfg(not(target_arch = "wasm32"))]
@@ -31,16 +31,19 @@ async fn main() -> Result<()> {
         .with_target(false)
         .init();
 
-    let nsec = std::env::var("PASSWD_NSEC").map_err(|_| {
-        anyhow::anyhow!("PASSWD_NSEC not set; provide your Nostr nsec for self-DM vault sync")
-    })?;
-
-    let keys = Keys::parse(&nsec)?;
+    let signer_credential = std::env::var("PASSWD_SIGNER")
+        .or_else(|_| std::env::var("PASSWD_NSEC"))
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "PASSWD_SIGNER or PASSWD_NSEC not set; provide nsec or bunker:// signer credential"
+            )
+        })?;
+    let signer = signer_from_input(&signer_credential)?;
     let store = LocalStore::new()?;
     let indicator = Arc::new(SyncIndicator::default());
 
     let app = PasswdApp::new(
-        keys,
+        signer,
         DEFAULT_RELAYS.iter().map(|s| s.to_string()).collect(),
         store,
         indicator.clone(),

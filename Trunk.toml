@@ -1,0 +1,6 @@
+[build]
+# Custom domain deployment uses root path.
+public_url = "/"
+
+[watch]
+ignore = ["target"]

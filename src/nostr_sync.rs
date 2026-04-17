@@ -1,7 +1,9 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
+use nostr_connect::prelude::{NostrConnect, NostrConnectURI};
 use nostr_sdk::prelude::*;
 use tracing::{debug, warn};
 
@@ -22,7 +24,14 @@ pub struct NostrSync {
 
 impl NostrSync {
     pub async fn new(keys: Keys, relays: Vec<String>) -> Result<Self> {
-        let client = Client::new(keys.clone());
+        Self::new_with_signer(keys.into_nostr_signer(), relays).await
+    }
+
+    pub async fn new_with_signer(
+        signer: Arc<dyn NostrSigner>,
+        relays: Vec<String>,
+    ) -> Result<Self> {
+        let client = Client::new(signer);
 
         for relay in &relays {
             client.add_relay(relay).await?;
@@ -30,12 +39,9 @@ impl NostrSync {
 
         client.connect().await;
         client.wait_for_connection(Duration::from_secs(5)).await;
+        let me = client.public_key().await?;
 
-        Ok(Self {
-            client,
-            me: keys.public_key(),
-            relays,
-        })
+        Ok(Self { client, me, relays })
     }
 
     pub async fn sync(
@@ -138,4 +144,22 @@ impl NostrSync {
     pub async fn shutdown(&self) {
         self.client.shutdown().await;
     }
+}
+
+pub fn signer_from_input(input: &str) -> Result<Arc<dyn NostrSigner>> {
+    let credential = input.trim();
+
+    if credential.is_empty() {
+        anyhow::bail!("empty signer credential");
+    }
+
+    if credential.starts_with("bunker://") || credential.starts_with("nostrconnect://") {
+        let uri = NostrConnectURI::parse(credential)?;
+        let session_keys = Keys::generate();
+        let signer = NostrConnect::new(uri, session_keys, Duration::from_secs(25), None)?;
+        return Ok(signer.into_nostr_signer());
+    }
+
+    let keys = Keys::parse(credential)?;
+    Ok(keys.into_nostr_signer())
 }
