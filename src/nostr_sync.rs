@@ -1,0 +1,141 @@
+use std::collections::HashMap;
+use std::time::Duration;
+
+use anyhow::Result;
+use nostr_sdk::prelude::*;
+use tracing::{debug, warn};
+
+use crate::model::{PasswordEntry, PasswordEnvelope};
+
+#[derive(Debug)]
+pub struct SyncResult {
+    pub downloaded: usize,
+    pub uploaded: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct NostrSync {
+    client: Client,
+    me: PublicKey,
+    relays: Vec<String>,
+}
+
+impl NostrSync {
+    pub async fn new(keys: Keys, relays: Vec<String>) -> Result<Self> {
+        let client = Client::new(keys.clone());
+
+        for relay in &relays {
+            client.add_relay(relay).await?;
+        }
+
+        client.connect().await;
+        client.wait_for_connection(Duration::from_secs(5)).await;
+
+        Ok(Self {
+            client,
+            me: keys.public_key(),
+            relays,
+        })
+    }
+
+    pub async fn sync(
+        &self,
+        local_entries: &HashMap<String, PasswordEntry>,
+    ) -> Result<(HashMap<String, PasswordEntry>, SyncResult)> {
+        let filter = Filter::new()
+            .kind(Kind::GiftWrap)
+            .pubkey(self.me)
+            .limit(2_000);
+
+        let events = self
+            .client
+            .fetch_events(filter, Duration::from_secs(20))
+            .await?;
+
+        let mut remote_latest: HashMap<String, PasswordEntry> = HashMap::new();
+
+        for event in events {
+            let unwrapped = match self.client.unwrap_gift_wrap(&event).await {
+                Ok(v) => v,
+                Err(err) => {
+                    debug!(error = %err, event_id = %event.id, "failed to unwrap gift wrap");
+                    continue;
+                }
+            };
+
+            let envelope: PasswordEnvelope =
+                match serde_json::from_str::<PasswordEnvelope>(&unwrapped.rumor.content) {
+                    Ok(v) if v.schema == "passwd.v1" => v,
+                    Ok(_) => continue,
+                    Err(_) => continue,
+                };
+
+            let mut entry = envelope.entry;
+            entry.last_event_id = Some(event.id.to_hex());
+
+            let merged = PasswordEntry::merge_prefer_newer(remote_latest.get(&entry.id), entry);
+            remote_latest.insert(merged.id.clone(), merged);
+        }
+
+        let mut merged_entries = local_entries.clone();
+        let mut downloaded = 0;
+
+        for (id, remote_entry) in &remote_latest {
+            let merged =
+                PasswordEntry::merge_prefer_newer(merged_entries.get(id), remote_entry.clone());
+            if merged_entries.get(id) != Some(&merged) {
+                downloaded += 1;
+            }
+            merged_entries.insert(id.clone(), merged);
+        }
+
+        let mut uploaded = 0;
+
+        for entry in merged_entries.values_mut() {
+            let remote_entry = remote_latest.get(&entry.id);
+            let should_upload = match remote_entry {
+                None => true,
+                Some(remote) => entry.updated_at > remote.updated_at,
+            };
+
+            if !should_upload {
+                continue;
+            }
+
+            let payload = PasswordEnvelope::from_entry(entry.clone());
+            let content = serde_json::to_string(&payload)?;
+
+            let output = self
+                .client
+                .send_private_msg_to(
+                    self.relays.clone(),
+                    self.me,
+                    content,
+                    std::iter::empty::<Tag>(),
+                )
+                .await;
+
+            match output {
+                Ok(sent) => {
+                    entry.last_event_id = Some(sent.val.to_hex());
+                    uploaded += 1;
+                }
+                Err(err) => {
+                    warn!(error = %err, entry_id = %entry.id, "failed to publish password entry");
+                }
+            }
+        }
+
+        Ok((
+            merged_entries,
+            SyncResult {
+                downloaded,
+                uploaded,
+            },
+        ))
+    }
+
+    pub async fn shutdown(&self) {
+        self.client.shutdown().await;
+    }
+}
