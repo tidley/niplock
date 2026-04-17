@@ -602,6 +602,26 @@ body {
             })
         };
 
+        let on_entries_modified = {
+            let nsec = nsec.clone();
+            let entries = entries.clone();
+            let sync_state = sync_state.clone();
+            let last_sync = last_sync.clone();
+            let sync_in_flight = sync_in_flight.clone();
+            let unlocked = unlocked.clone();
+            Callback::from(move |_| {
+                if *unlocked {
+                    spawn_sync(
+                        nsec.clone(),
+                        entries.clone(),
+                        sync_state.clone(),
+                        last_sync.clone(),
+                        sync_in_flight.clone(),
+                    );
+                }
+            })
+        };
+
         let on_draft_service = {
             let draft = draft.clone();
             Callback::from(move |e: InputEvent| {
@@ -649,6 +669,7 @@ body {
             let draft = draft.clone();
             let editor_open = editor_open.clone();
             let selected_id = selected_id.clone();
+            let on_entries_modified = on_entries_modified.clone();
             Callback::from(move |_| {
                 if draft.service.trim().is_empty()
                     || draft.username.trim().is_empty()
@@ -687,6 +708,7 @@ body {
                 selected_id.set(Some(id));
                 editor_open.set(false);
                 draft.set(Draft::default());
+                on_entries_modified.emit(());
             })
         };
 
@@ -872,6 +894,7 @@ body {
                                         show_secret.clone(),
                                         entries.clone(),
                                         copy_notice.clone(),
+                                        on_entries_modified.clone(),
                                     ),
                                     Page::Generator => render_generator_page(
                                         (*generated).clone(),
@@ -932,6 +955,7 @@ body {
         show_secret_state: UseStateHandle<bool>,
         entries_state: UseStateHandle<Vec<PasswordEntry>>,
         copy_notice: UseStateHandle<Option<String>>,
+        on_entries_modified: Callback<()>,
     ) -> Html {
         if let Some(entry) = selected_entry {
             let on_back = {
@@ -961,6 +985,7 @@ body {
             let on_purge = {
                 let entries_state = entries_state.clone();
                 let selected_id = selected_id.clone();
+                let on_entries_modified = on_entries_modified.clone();
                 Callback::from(move |_| {
                     let mut map = to_map(&entries_state);
                     map.remove(&delete_id);
@@ -968,6 +993,7 @@ body {
                     save_entries(&next);
                     entries_state.set(next);
                     selected_id.set(None);
+                    on_entries_modified.emit(());
                 })
             };
 
