@@ -13,8 +13,8 @@ mod web {
     use passwd::model::PasswordEntry;
     use passwd::nostr_sync::NostrSync;
     use uuid::Uuid;
-    use wasm_bindgen_futures::spawn_local;
-    use web_sys::{window, HtmlInputElement};
+    use wasm_bindgen_futures::{spawn_local, JsFuture};
+    use web_sys::{window, HtmlInputElement, HtmlTextAreaElement};
     use yew::prelude::*;
 
     const STORAGE_KEY: &str = "passwd.vault.v1";
@@ -22,107 +22,153 @@ mod web {
 
     const CSS: &str = r#"
 :root {
-  --bg: #0f172a;
-  --panel: #111c37;
-  --panel-2: #172447;
-  --text: #dbeafe;
-  --muted: #93a6c6;
-  --accent: #22c55e;
-  --warn: #f97316;
-  --err: #ef4444;
-  --line: #27406f;
+  --bg: #f4f7fb;
+  --panel: #ffffff;
+  --text: #1f2937;
+  --muted: #6b7280;
+  --line: #d1d5db;
+  --accent: #16a34a;
+  --warn: #f59e0b;
+  --err: #dc2626;
+  --primary: #2563eb;
 }
 body {
   margin: 0;
-  background: radial-gradient(1200px 500px at 20% -20%, #1f3b77, transparent), var(--bg);
+  background: var(--bg);
   color: var(--text);
   font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
 }
 .app {
-  max-width: 980px;
+  max-width: 1200px;
   margin: 0 auto;
-  padding: 1.25rem;
+  padding: 16px;
 }
 .head {
-  margin-bottom: 1rem;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 10px;
 }
 .title {
   font-family: "Space Grotesk", "Segoe UI", sans-serif;
-  letter-spacing: 0.02em;
+  font-size: 1.35rem;
   margin: 0;
 }
 .muted {
   color: var(--muted);
-}
-.grid {
-  display: grid;
-  gap: 1rem;
-  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  font-size: 0.9rem;
 }
 .card {
-  background: linear-gradient(180deg, var(--panel), var(--panel-2));
+  background: var(--panel);
   border: 1px solid var(--line);
-  border-radius: 14px;
-  padding: 1rem;
+  border-radius: 10px;
+  padding: 12px;
+  margin-bottom: 10px;
 }
 label {
   display: block;
-  font-size: 0.85rem;
+  font-size: 0.78rem;
+  font-weight: 600;
   color: var(--muted);
   margin-bottom: 0.3rem;
 }
 input, textarea {
   width: 100%;
   box-sizing: border-box;
-  background: #0e1630;
+  background: #fff;
   color: var(--text);
-  border: 1px solid #223d6e;
-  border-radius: 10px;
-  padding: 0.65rem;
-  margin-bottom: 0.75rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 10px;
+  margin-bottom: 10px;
 }
 textarea {
-  min-height: 82px;
+  min-height: 66px;
   resize: vertical;
 }
 button {
-  background: #1d4ed8;
-  color: #eff6ff;
-  border: 0;
-  border-radius: 10px;
-  padding: 0.55rem 0.8rem;
+  background: var(--primary);
+  color: #fff;
+  border: 1px solid var(--primary);
+  border-radius: 8px;
+  padding: 7px 10px;
   cursor: pointer;
   font-weight: 600;
+  font-size: 0.85rem;
 }
 button.alt {
-  background: #334155;
+  background: #fff;
+  color: #111827;
+  border-color: var(--line);
 }
 button.danger {
-  background: #991b1b;
+  background: #fff;
+  color: var(--err);
+  border-color: #fecaca;
 }
 .row {
   display: flex;
-  flex-wrap: wrap;
-  gap: 0.6rem;
+  align-items: center;
+  gap: 8px;
 }
-.entry {
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  padding: 0.7rem;
-  margin-bottom: 0.6rem;
-  background: #0e1630;
+.toolbar {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: 1.5fr 1fr 200px auto;
+  align-items: end;
 }
-.entry h4 {
-  margin: 0 0 0.3rem 0;
+.layout {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: 320px 1fr;
+}
+.field-inline {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 8px;
+  align-items: end;
+}
+.icon-btn {
+  min-width: 40px;
+}
+.table-wrap {
+  overflow: auto;
+}
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9rem;
+}
+th, td {
+  text-align: left;
+  border-bottom: 1px solid var(--line);
+  padding: 8px;
+  white-space: nowrap;
+}
+th {
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+tr:hover {
+  background: #f9fafb;
+}
+.copy-cell {
+  cursor: copy;
+}
+.copy-hint {
+  font-size: 0.8rem;
+  color: var(--muted);
 }
 .corner {
   position: fixed;
-  top: 12px;
-  right: 12px;
+  top: 10px;
+  right: 10px;
   width: 11px;
   height: 11px;
   border-radius: 999px;
-  box-shadow: 0 0 0 2px rgba(15, 23, 42, 0.8);
+  border: 1px solid #fff;
 }
 .corner.idle { background: var(--accent); }
 .corner.syncing { background: var(--warn); animation: pulse 1s infinite; }
@@ -133,7 +179,15 @@ button.danger {
   100% { opacity: 0.5; transform: scale(0.9); }
 }
 @media (max-width: 640px) {
-  .app { padding: 0.8rem; }
+  .app { padding: 10px; }
+}
+@media (max-width: 1000px) {
+  .layout {
+    grid-template-columns: 1fr;
+  }
+  .toolbar {
+    grid-template-columns: 1fr;
+  }
 }
 "#;
 
@@ -165,6 +219,9 @@ button.danger {
         let sync_state = use_state(|| SyncState::Idle);
         let last_sync = use_state(|| None::<String>);
         let sync_in_flight = use_state(|| false);
+        let show_secret = use_state(|| false);
+        let search = use_state(String::new);
+        let copy_notice = use_state(|| None::<String>);
 
         {
             let entries = entries.clone();
@@ -268,7 +325,7 @@ button.danger {
         let on_notes_input = {
             let draft = draft.clone();
             Callback::from(move |event: InputEvent| {
-                let input: HtmlInputElement = event.target_unchecked_into();
+                let input: HtmlTextAreaElement = event.target_unchecked_into();
                 let mut next = (*draft).clone();
                 next.notes = input.value();
                 draft.set(next);
@@ -278,6 +335,7 @@ button.danger {
         let on_save_entry = {
             let entries = entries.clone();
             let draft = draft.clone();
+            let show_secret = show_secret.clone();
             Callback::from(move |_| {
                 if draft.service.trim().is_empty()
                     || draft.username.trim().is_empty()
@@ -315,13 +373,16 @@ button.danger {
                 save_entries(&next);
                 entries.set(next);
                 draft.set(Draft::default());
+                show_secret.set(false);
             })
         };
 
         let on_reset_form = {
             let draft = draft.clone();
+            let show_secret = show_secret.clone();
             Callback::from(move |_| {
                 draft.set(Draft::default());
+                show_secret.set(false);
             })
         };
 
@@ -342,6 +403,39 @@ button.danger {
             })
         };
 
+        let on_toggle_secret = {
+            let show_secret = show_secret.clone();
+            Callback::from(move |_| {
+                show_secret.set(!*show_secret);
+            })
+        };
+
+        let on_search_input = {
+            let search = search.clone();
+            Callback::from(move |event: InputEvent| {
+                let input: HtmlInputElement = event.target_unchecked_into();
+                search.set(input.value());
+            })
+        };
+
+        let filtered_entries: Vec<PasswordEntry> = {
+            let q = search.trim().to_ascii_lowercase();
+            entries
+                .iter()
+                .filter(|entry| {
+                    q.is_empty()
+                        || entry.service.to_ascii_lowercase().contains(&q)
+                        || entry.username.to_ascii_lowercase().contains(&q)
+                        || entry
+                            .notes
+                            .as_ref()
+                            .map(|v| v.to_ascii_lowercase().contains(&q))
+                            .unwrap_or(false)
+                })
+                .cloned()
+                .collect()
+        };
+
         let corner_class = match &*sync_state {
             SyncState::Idle => "corner idle",
             SyncState::Syncing => "corner syncing",
@@ -360,22 +454,34 @@ button.danger {
                 <div class={corner_class}></div>
                 <div class="app">
                     <div class="head">
-                        <h1 class="title">{"passwd (web)"}</h1>
-                        <div class="muted">{"Web-first NIP-17 password vault sync"}</div>
+                        <h1 class="title">{"passwd"}</h1>
+                        <div class="muted">{sync_label.clone()}</div>
                     </div>
-                    <div class="grid">
-                        <section class="card">
+
+                    <section class="card toolbar">
+                        <div>
+                            <label for="search">{"Search"}</label>
+                            <input id="search" placeholder="Search service / user / notes" value={(*search).clone()} oninput={on_search_input} />
+                        </div>
+                        <div>
                             <label for="nsec">{"Nostr nsec"}</label>
                             <input id="nsec" type="password" placeholder="nsec1..." value={(*nsec).clone()} oninput={on_nsec_input} />
-                            <div class="row">
-                                <button onclick={on_sync_now}>{"Sync now"}</button>
-                                <span class="muted">{sync_label}</span>
-                            </div>
+                        </div>
+                        <div class="muted">
+                            {format!("Entries: {}", filtered_entries.len())}
                             if let Some(ts) = &*last_sync {
-                                <p class="muted">{format!("Last sync: {ts}")}</p>
+                                <div>{format!("Last sync: {ts}")}</div>
                             }
-                        </section>
+                            if let Some(msg) = &*copy_notice {
+                                <div>{msg.clone()}</div>
+                            }
+                        </div>
+                        <div class="row">
+                            <button onclick={on_sync_now}>{"Sync now"}</button>
+                        </div>
+                    </section>
 
+                    <div class="layout">
                         <section class="card">
                             <h3>{ if draft.id.is_some() { "Edit entry" } else { "Add entry" } }</h3>
                             <label for="service">{"Service"}</label>
@@ -383,7 +489,10 @@ button.danger {
                             <label for="username">{"Username"}</label>
                             <input id="username" value={draft.username.clone()} oninput={on_username_input} />
                             <label for="secret">{"Password / Secret"}</label>
-                            <input id="secret" type="password" value={draft.secret.clone()} oninput={on_secret_input} />
+                            <div class="field-inline">
+                                <input id="secret" type={if *show_secret { "text" } else { "password" }} value={draft.secret.clone()} oninput={on_secret_input} />
+                                <button class="alt icon-btn" type="button" onclick={on_toggle_secret}>{"👁"}</button>
+                            </div>
                             <label for="notes">{"Notes"}</label>
                             <textarea id="notes" value={draft.notes.clone()} oninput={on_notes_input}></textarea>
                             <div class="row">
@@ -391,21 +500,40 @@ button.danger {
                                 <button class="alt" onclick={on_reset_form}>{"Clear form"}</button>
                             </div>
                         </section>
-                    </div>
 
-                    <section class="card" style="margin-top: 1rem;">
-                        <h3>{format!("Vault entries ({})", entries.len())}</h3>
+                        <section class="card">
+                        <div class="row" style="justify-content: space-between;">
+                            <h3>{format!("Vault entries ({})", filtered_entries.len())}</h3>
+                            <div class="copy-hint">{"Double-click username or password to copy"}</div>
+                        </div>
                         {
-                            if entries.is_empty() {
+                            if filtered_entries.is_empty() {
                                 html! { <p class="muted">{"No entries yet."}</p> }
                             } else {
                                 html! {
-                                    {for entries.iter().map(|entry| {
+                                    <div class="table-wrap">
+                                    <table>
+                                        <thead>
+                                            <tr>
+                                                <th>{"Service"}</th>
+                                                <th>{"Username"}</th>
+                                                <th>{"Password"}</th>
+                                                <th>{"Updated"}</th>
+                                                <th>{"Actions"}</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                    {for filtered_entries.iter().map(|entry| {
                                         let id = entry.id.clone();
                                         let entry_for_edit = entry.clone();
+                                        let entry_for_copy_user = entry.clone();
+                                        let entry_for_copy_secret = entry.clone();
                                         let entries_for_delete = entries.clone();
                                         let entries_for_edit = entries.clone();
                                         let draft_for_edit = draft.clone();
+                                        let copy_notice_for_user = copy_notice.clone();
+                                        let copy_notice_for_secret = copy_notice.clone();
+                                        let show_secret_for_edit = show_secret.clone();
 
                                         let on_delete = Callback::from(move |_| {
                                             let mut map = to_map(&entries_for_delete);
@@ -423,31 +551,73 @@ button.danger {
                                                 secret: entry_for_edit.secret.clone(),
                                                 notes: entry_for_edit.notes.clone().unwrap_or_default(),
                                             });
+                                            show_secret_for_edit.set(false);
                                             entries_for_edit.set((*entries_for_edit).clone());
                                         });
 
+                                        let on_copy_user = Callback::from(move |_| {
+                                            copy_to_clipboard(
+                                                entry_for_copy_user.username.clone(),
+                                                copy_notice_for_user.clone(),
+                                                format!("Copied username for {}", entry_for_copy_user.service),
+                                            );
+                                        });
+
+                                        let on_copy_secret = Callback::from(move |_| {
+                                            copy_to_clipboard(
+                                                entry_for_copy_secret.secret.clone(),
+                                                copy_notice_for_secret.clone(),
+                                                format!("Copied password for {}", entry_for_copy_secret.service),
+                                            );
+                                        });
+
                                         html! {
-                                            <article class="entry" key={entry.id.clone()}>
-                                                <h4>{&entry.service}</h4>
-                                                <div class="muted">{format!("{}  |  {}", entry.username, entry.updated_at)}</div>
-                                                <div>{"Secret: "}<strong>{"••••••••"}</strong></div>
-                                                if let Some(notes) = &entry.notes {
-                                                    <div class="muted">{notes.clone()}</div>
-                                                }
-                                                <div class="row" style="margin-top: 0.45rem;">
-                                                    <button class="alt" onclick={on_edit}>{"Edit"}</button>
-                                                    <button class="danger" onclick={on_delete}>{"Delete"}</button>
-                                                </div>
-                                            </article>
+                                            <tr key={entry.id.clone()}>
+                                                <td>{&entry.service}</td>
+                                                <td class="copy-cell" ondblclick={on_copy_user}>{&entry.username}</td>
+                                                <td class="copy-cell" ondblclick={on_copy_secret}>{"••••••••"}</td>
+                                                <td>{entry.updated_at.format("%Y-%m-%d %H:%M").to_string()}</td>
+                                                <td>
+                                                    <div class="row">
+                                                        <button class="alt" onclick={on_edit}>{"Edit"}</button>
+                                                        <button class="danger" onclick={on_delete}>{"Delete"}</button>
+                                                    </div>
+                                                </td>
+                                            </tr>
                                         }
                                     })}
+                                        </tbody>
+                                    </table>
+                                    </div>
                                 }
                             }
                         }
                     </section>
+                    </div>
                 </div>
             </>
         }
+    }
+
+    fn copy_to_clipboard(
+        value: String,
+        copy_notice: UseStateHandle<Option<String>>,
+        success_message: String,
+    ) {
+        let Some(win) = window() else {
+            copy_notice.set(Some("Copy failed".to_string()));
+            return;
+        };
+
+        let clipboard = win.navigator().clipboard();
+        let promise = clipboard.write_text(&value);
+        spawn_local(async move {
+            if JsFuture::from(promise).await.is_ok() {
+                copy_notice.set(Some(success_message));
+            } else {
+                copy_notice.set(Some("Copy failed".to_string()));
+            }
+        });
     }
 
     fn spawn_sync(
