@@ -1,15 +1,25 @@
+#[cfg(not(target_arch = "wasm32"))]
 use std::sync::Arc;
 
+#[cfg(not(target_arch = "wasm32"))]
 use anyhow::Result;
+#[cfg(not(target_arch = "wasm32"))]
 use nostr_sdk::prelude::*;
+#[cfg(not(target_arch = "wasm32"))]
 use passwd::app::PasswdApp;
+#[cfg(not(target_arch = "wasm32"))]
 use passwd::store::LocalStore;
+#[cfg(not(target_arch = "wasm32"))]
 use passwd::ui::SyncIndicator;
-use tokio::time::{Duration, sleep};
+#[cfg(not(target_arch = "wasm32"))]
+use tokio::time::{sleep, Duration};
+#[cfg(not(target_arch = "wasm32"))]
 use tracing::{error, info};
 
+#[cfg(not(target_arch = "wasm32"))]
 const DEFAULT_RELAYS: [&str; 2] = ["wss://nip17.tomdwyer.uk", "wss://nip17.com"];
 
+#[cfg(not(target_arch = "wasm32"))]
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -62,3 +72,6 @@ async fn main() -> Result<()> {
 
     Ok(())
 }
+
+#[cfg(target_arch = "wasm32")]
+fn main() {}
