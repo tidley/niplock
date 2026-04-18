@@ -11,14 +11,14 @@ use crate::store::{LocalStore, VaultSnapshot};
 use crate::ui::SyncIndicator;
 
 #[derive(Debug, Clone)]
-pub struct PasswdApp {
+pub struct NiplockApp {
     store: LocalStore,
     sync: NostrSync,
     indicator: Arc<SyncIndicator>,
     sync_lock: Arc<Mutex<()>>,
 }
 
-impl PasswdApp {
+impl NiplockApp {
     pub async fn new(
         signer: Arc<dyn NostrSigner>,
         relays: Vec<String>,

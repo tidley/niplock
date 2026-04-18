@@ -4,13 +4,13 @@ use std::sync::Arc;
 #[cfg(not(target_arch = "wasm32"))]
 use anyhow::Result;
 #[cfg(not(target_arch = "wasm32"))]
-use passwd::app::PasswdApp;
+use niplock::app::NiplockApp;
 #[cfg(not(target_arch = "wasm32"))]
-use passwd::nostr_sync::signer_from_input;
+use niplock::nostr_sync::signer_from_input;
 #[cfg(not(target_arch = "wasm32"))]
-use passwd::store::LocalStore;
+use niplock::store::LocalStore;
 #[cfg(not(target_arch = "wasm32"))]
-use passwd::ui::SyncIndicator;
+use niplock::ui::SyncIndicator;
 #[cfg(not(target_arch = "wasm32"))]
 use tokio::time::{Duration, sleep};
 #[cfg(not(target_arch = "wasm32"))]
@@ -25,24 +25,24 @@ async fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive("passwd=info".parse()?)
+                .add_directive("niplock=info".parse()?)
                 .add_directive("nostr_relay_pool=warn".parse()?),
         )
         .with_target(false)
         .init();
 
-    let signer_credential = std::env::var("PASSWD_SIGNER")
-        .or_else(|_| std::env::var("PASSWD_NSEC"))
+    let signer_credential = std::env::var("NIPLOCK_SIGNER")
+        .or_else(|_| std::env::var("NIPLOCK_NSEC"))
         .map_err(|_| {
             anyhow::anyhow!(
-                "PASSWD_SIGNER or PASSWD_NSEC not set; provide nsec or bunker:// signer credential"
+                "NIPLOCK_SIGNER or NIPLOCK_NSEC not set; provide nsec or bunker:// signer credential"
             )
         })?;
     let signer = signer_from_input(&signer_credential)?;
     let store = LocalStore::new()?;
     let indicator = Arc::new(SyncIndicator::default());
 
-    let app = PasswdApp::new(
+    let app = NiplockApp::new(
         signer,
         DEFAULT_RELAYS.iter().map(|s| s.to_string()).collect(),
         store,
@@ -55,7 +55,7 @@ async fn main() -> Result<()> {
         startup_app.startup_sync().await;
     });
 
-    info!("passwd running; press Ctrl+C to trigger graceful shutdown sync");
+    info!("niplock running; press Ctrl+C to trigger graceful shutdown sync");
 
     loop {
         tokio::select! {

@@ -74,7 +74,7 @@ impl NostrSync {
 
             let envelope: PasswordEnvelope =
                 match serde_json::from_str::<PasswordEnvelope>(&unwrapped.rumor.content) {
-                    Ok(v) if v.schema == "passwd.v1" => v,
+                    Ok(v) if v.schema == "niplock.v1" => v,
                     Ok(_) => continue,
                     Err(_) => continue,
                 };

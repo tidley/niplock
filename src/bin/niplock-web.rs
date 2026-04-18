@@ -1,6 +1,6 @@
 #[cfg(not(target_arch = "wasm32"))]
 fn main() {
-    eprintln!("passwd-web is a wasm binary. Build with: trunk serve --open");
+    eprintln!("niplock-web is a wasm binary. Build with: trunk serve --open");
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -11,17 +11,33 @@ mod web {
 
     use chrono::{DateTime, Utc};
     use gloo_events::EventListener;
-    use js_sys::Math;
+    use gloo_timers::callback::Timeout;
+    use js_sys::{Date, Math};
+    use niplock::model::PasswordEntry;
+    use niplock::nostr_sync::{NostrSync, signer_from_input};
     use nostr_sdk::prelude::{Keys, NostrConnectURI, RelayUrl, ToBech32};
-    use passwd::model::PasswordEntry;
-    use passwd::nostr_sync::{NostrSync, signer_from_input};
     use uuid::Uuid;
     use wasm_bindgen_futures::{JsFuture, spawn_local};
-    use web_sys::{HtmlInputElement, HtmlTextAreaElement, window};
+    use web_sys::{HtmlInputElement, HtmlTextAreaElement, WebSocket, window};
     use yew::prelude::*;
 
-    const STORAGE_KEY: &str = "passwd.vault.v1";
-    const DEFAULT_RELAYS: [&str; 2] = ["wss://nip17.tomdwyer.uk", "wss://nip17.com"];
+    const STORAGE_KEY: &str = "niplock.vault.v1";
+    const RELAYS_STORAGE_KEY: &str = "niplock.relays.v1";
+    const DEFAULT_RELAYS: [&str; 13] = [
+        "wss://relay.damus.io",
+        "wss://relay.primal.net",
+        "wss://nip17.com",
+        "wss://nip17.tomdwyer.uk",
+        "wss://nos.lol",
+        "wss://nostr.mom",
+        "wss://relay.nostr.band",
+        "wss://relay.snort.social",
+        "wss://relay.nostr.bg",
+        "wss://eden.nostr.land",
+        "wss://relay.nostr.wine",
+        "wss://relay.plebstr.com",
+        "wss://inbox.nostr.wine",
+    ];
 
     const CSS: &str = r#"
 :root {
@@ -478,6 +494,20 @@ button:disabled { cursor: not-allowed; }
         notes: String,
     }
 
+    #[derive(Clone, PartialEq)]
+    enum RelayProbeState {
+        Checking,
+        Reachable,
+        Unreachable,
+    }
+
+    #[derive(Clone, PartialEq)]
+    struct RelayProbe {
+        relay: String,
+        state: RelayProbeState,
+        latency_ms: Option<u32>,
+    }
+
     pub fn run() {
         yew::Renderer::<WebApp>::new().render();
     }
@@ -512,6 +542,13 @@ button:disabled { cursor: not-allowed; }
         let live_subscription_id = use_mut_ref(|| None::<nostr_sdk::prelude::SubscriptionId>);
         let live_listener_running = use_mut_ref(|| false);
         let copy_notice = use_state(|| None::<String>);
+        let relays = use_state(load_relays);
+        let relay_probes = use_state({
+            let relays = (*relays).clone();
+            move || default_relay_probes(&relays)
+        });
+        let relay_input = use_state(String::new);
+        let relay_error = use_state(|| None::<String>);
 
         let gen_len = use_state(|| 18usize);
         let gen_upper = use_state(|| true);
@@ -565,6 +602,7 @@ button:disabled { cursor: not-allowed; }
             let sync_in_flight = sync_in_flight.clone();
             let live_sync = live_sync.clone();
             let unlocked = unlocked.clone();
+            let relays = relays.clone();
             use_effect_with((), move |_| {
                 let doc_listener = window().and_then(|w| w.document()).map(|doc| {
                     let entries = entries.clone();
@@ -574,6 +612,7 @@ button:disabled { cursor: not-allowed; }
                     let sync_in_flight = sync_in_flight.clone();
                     let live_sync = live_sync.clone();
                     let unlocked = unlocked.clone();
+                    let relays = relays.clone();
                     EventListener::new(&doc, "visibilitychange", move |_| {
                         if *unlocked {
                             if let Some(document) = window().and_then(|w| w.document()) {
@@ -581,6 +620,7 @@ button:disabled { cursor: not-allowed; }
                                     spawn_sync(
                                         (*signer_credential).clone(),
                                         (*entries).clone(),
+                                        (*relays).clone(),
                                         entries.clone(),
                                         sync_state.clone(),
                                         last_sync.clone(),
@@ -601,11 +641,13 @@ button:disabled { cursor: not-allowed; }
                     let sync_in_flight = sync_in_flight.clone();
                     let live_sync = live_sync.clone();
                     let unlocked = unlocked.clone();
+                    let relays = relays.clone();
                     EventListener::new(&win, "pagehide", move |_| {
                         if *unlocked {
                             spawn_sync(
                                 (*signer_credential).clone(),
                                 (*entries).clone(),
+                                (*relays).clone(),
                                 entries.clone(),
                                 sync_state.clone(),
                                 last_sync.clone(),
@@ -623,6 +665,22 @@ button:disabled { cursor: not-allowed; }
             });
         }
 
+        {
+            let page = page.clone();
+            let unlocked = unlocked.clone();
+            let relay_probes = relay_probes.clone();
+            let relays = relays.clone();
+            use_effect_with(
+                ((*page).clone(), *unlocked, (*relays).clone()),
+                move |(active_page, is_unlocked, configured_relays)| {
+                    if *is_unlocked && *active_page == Page::Settings {
+                        probe_relays(configured_relays.clone(), relay_probes.clone());
+                    }
+                    || ()
+                },
+            );
+        }
+
         let start_live_listener = {
             let signer_credential = signer_credential.clone();
             let entries = entries.clone();
@@ -633,6 +691,7 @@ button:disabled { cursor: not-allowed; }
             let live_subscription_id = live_subscription_id.clone();
             let live_listener_running = live_listener_running.clone();
             let unlocked = unlocked.clone();
+            let relays = relays.clone();
             Callback::from(move |_| {
                 if *live_listener_running.borrow() {
                     return;
@@ -648,6 +707,7 @@ button:disabled { cursor: not-allowed; }
                 let live_subscription_id = live_subscription_id.clone();
                 let live_listener_running = live_listener_running.clone();
                 let unlocked = unlocked.clone();
+                let relays = (*relays).clone();
                 spawn_local(async move {
                     loop {
                         if !*unlocked || !*live_listener_running.borrow() {
@@ -662,12 +722,7 @@ button:disabled { cursor: not-allowed; }
                                 Err(_) => break,
                             };
 
-                            match NostrSync::new_with_signer(
-                                signer,
-                                DEFAULT_RELAYS.iter().map(|r| r.to_string()).collect(),
-                            )
-                            .await
-                            {
+                            match NostrSync::new_with_signer(signer, relays.clone()).await {
                                 Ok(v) => {
                                     *live_sync.borrow_mut() = Some(v.clone());
                                     v
@@ -702,6 +757,7 @@ button:disabled { cursor: not-allowed; }
                         spawn_sync(
                             (*signer_credential).clone(),
                             (*entries).clone(),
+                            relays.clone(),
                             entries.clone(),
                             sync_state.clone(),
                             last_sync.clone(),
@@ -829,6 +885,7 @@ button:disabled { cursor: not-allowed; }
             let live_sync = live_sync.clone();
             let live_subscription_id = live_subscription_id.clone();
             let live_listener_running = live_listener_running.clone();
+            let relays = relays.clone();
             Callback::from(move |_| {
                 if *unlocked {
                     sync_state.set(SyncState::Syncing);
@@ -836,6 +893,7 @@ button:disabled { cursor: not-allowed; }
                     let sync_state = sync_state.clone();
                     let signer_credential = (*signer_credential).clone();
                     let current_entries = (*entries).clone();
+                    let relays = (*relays).clone();
                     spawn_local(async move {
                         let mut sync = live_sync.borrow_mut().take();
                         if sync.is_none() {
@@ -848,12 +906,7 @@ button:disabled { cursor: not-allowed; }
                                     return;
                                 }
                             };
-                            sync = match NostrSync::new_with_signer(
-                                signer,
-                                DEFAULT_RELAYS.iter().map(|r| r.to_string()).collect(),
-                            )
-                            .await
-                            {
+                            sync = match NostrSync::new_with_signer(signer, relays.clone()).await {
                                 Ok(v) => Some(v),
                                 Err(_) => {
                                     sync_state.set(SyncState::Error(
@@ -908,18 +961,16 @@ button:disabled { cursor: not-allowed; }
             let amber_uri = amber_uri.clone();
             let amber_session_credential = amber_session_credential.clone();
             let unlock_error = unlock_error.clone();
+            let relays = relays.clone();
             Callback::from(move |_| {
                 unlock_method.set(UnlockMethod::Amber);
                 let uri = if let Some(existing) = &*amber_uri {
                     existing.clone()
                 } else {
                     let session_keys = Keys::generate();
-                    let relay_urls: Vec<RelayUrl> = DEFAULT_RELAYS
-                        .iter()
-                        .filter_map(|r| RelayUrl::parse(*r).ok())
-                        .collect();
+                    let relay_urls = relay_urls_from_strings(&relays);
                     let uri =
-                        NostrConnectURI::client(session_keys.public_key(), relay_urls, "NipLock")
+                        NostrConnectURI::client(session_keys.public_key(), relay_urls, "niplock")
                             .to_string();
                     let app_key = match session_keys.secret_key().to_bech32() {
                         Ok(v) => v,
@@ -970,6 +1021,7 @@ button:disabled { cursor: not-allowed; }
             let sync_in_flight = sync_in_flight.clone();
             let live_sync = live_sync.clone();
             let start_live_listener = start_live_listener.clone();
+            let relays = relays.clone();
             Callback::from(move |_| {
                 let credential = match &*unlock_method {
                     UnlockMethod::Nip07 => "nip07".to_string(),
@@ -979,14 +1031,11 @@ button:disabled { cursor: not-allowed; }
                             prepared.clone()
                         } else {
                             let session_keys = Keys::generate();
-                            let relay_urls: Vec<RelayUrl> = DEFAULT_RELAYS
-                                .iter()
-                                .filter_map(|r| RelayUrl::parse(*r).ok())
-                                .collect();
+                            let relay_urls = relay_urls_from_strings(&relays);
                             let uri = NostrConnectURI::client(
                                 session_keys.public_key(),
                                 relay_urls,
-                                "NipLock",
+                                "niplock",
                             )
                             .to_string();
                             let app_key = match session_keys.secret_key().to_bech32() {
@@ -1032,6 +1081,7 @@ button:disabled { cursor: not-allowed; }
                         spawn_sync(
                             credential,
                             (*entries).clone(),
+                            (*relays).clone(),
                             entries.clone(),
                             sync_state.clone(),
                             last_sync.clone(),
@@ -1055,11 +1105,13 @@ button:disabled { cursor: not-allowed; }
             let sync_in_flight = sync_in_flight.clone();
             let live_sync = live_sync.clone();
             let unlocked = unlocked.clone();
+            let relays = relays.clone();
             Callback::from(move |_| {
                 if *unlocked {
                     spawn_sync(
                         (*signer_credential).clone(),
                         (*entries).clone(),
+                        (*relays).clone(),
                         entries.clone(),
                         sync_state.clone(),
                         last_sync.clone(),
@@ -1070,6 +1122,12 @@ button:disabled { cursor: not-allowed; }
             })
         };
 
+        let on_probe_relays = {
+            let relay_probes = relay_probes.clone();
+            let relays = relays.clone();
+            Callback::from(move |_| probe_relays((*relays).clone(), relay_probes.clone()))
+        };
+
         let on_entries_modified = {
             let signer_credential = signer_credential.clone();
             let entries = entries.clone();
@@ -1078,11 +1136,13 @@ button:disabled { cursor: not-allowed; }
             let sync_in_flight = sync_in_flight.clone();
             let live_sync = live_sync.clone();
             let unlocked = unlocked.clone();
+            let relays = relays.clone();
             Callback::from(move |current_entries: Vec<PasswordEntry>| {
                 if *unlocked {
                     spawn_sync(
                         (*signer_credential).clone(),
                         current_entries,
+                        (*relays).clone(),
                         entries.clone(),
                         sync_state.clone(),
                         last_sync.clone(),
@@ -1090,6 +1150,95 @@ button:disabled { cursor: not-allowed; }
                         live_sync.clone(),
                     );
                 }
+            })
+        };
+
+        let on_relay_input = {
+            let relay_input = relay_input.clone();
+            let relay_error = relay_error.clone();
+            Callback::from(move |e: InputEvent| {
+                let input: HtmlInputElement = e.target_unchecked_into();
+                relay_input.set(input.value());
+                relay_error.set(None);
+            })
+        };
+
+        let on_add_relay = {
+            let relays = relays.clone();
+            let relay_input = relay_input.clone();
+            let relay_error = relay_error.clone();
+            let relay_probes = relay_probes.clone();
+            let live_sync = live_sync.clone();
+            let live_subscription_id = live_subscription_id.clone();
+            let live_listener_running = live_listener_running.clone();
+            let unlocked = unlocked.clone();
+            let start_live_listener = start_live_listener.clone();
+            Callback::from(move |_| {
+                let candidate = relay_input.trim().to_string();
+                let normalized = match normalize_relay_url(&candidate) {
+                    Some(v) => v,
+                    None => {
+                        relay_error
+                            .set(Some("Enter a valid ws:// or wss:// relay URL".to_string()));
+                        return;
+                    }
+                };
+
+                let mut next = (*relays).clone();
+                if next
+                    .iter()
+                    .any(|existing| existing.eq_ignore_ascii_case(&normalized))
+                {
+                    relay_error.set(Some("Relay already added".to_string()));
+                    return;
+                }
+                next.push(normalized);
+                save_relays(&next);
+                relays.set(next.clone());
+                relay_probes.set(default_relay_probes(&next));
+                *live_sync.borrow_mut() = None;
+                *live_subscription_id.borrow_mut() = None;
+                *live_listener_running.borrow_mut() = false;
+                if *unlocked {
+                    start_live_listener.emit(());
+                }
+                relay_input.set(String::new());
+                relay_error.set(None);
+            })
+        };
+
+        let on_remove_relay = {
+            let relays = relays.clone();
+            let relay_error = relay_error.clone();
+            let relay_probes = relay_probes.clone();
+            let live_sync = live_sync.clone();
+            let live_subscription_id = live_subscription_id.clone();
+            let live_listener_running = live_listener_running.clone();
+            let unlocked = unlocked.clone();
+            let start_live_listener = start_live_listener.clone();
+            Callback::from(move |relay: String| {
+                if relays.len() <= 1 {
+                    relay_error.set(Some("At least one relay is required".to_string()));
+                    return;
+                }
+                let next: Vec<String> = relays
+                    .iter()
+                    .filter(|url| url.as_str() != relay.as_str())
+                    .cloned()
+                    .collect();
+                if next.len() == relays.len() {
+                    return;
+                }
+                save_relays(&next);
+                relays.set(next.clone());
+                relay_probes.set(default_relay_probes(&next));
+                *live_sync.borrow_mut() = None;
+                *live_subscription_id.borrow_mut() = None;
+                *live_listener_running.borrow_mut() = false;
+                if *unlocked {
+                    start_live_listener.emit(());
+                }
+                relay_error.set(None);
             })
         };
 
@@ -1342,7 +1491,7 @@ button:disabled { cursor: not-allowed; }
                 <div class="app">
                     <aside class={classes!("sidebar", if *mobile_menu_open { Some("mobile-open") } else { None })}>
                         <div class="brand">
-                            <h1>{"NipLock"}</h1>
+                            <h1>{"niplock"}</h1>
                         </div>
                         <button class={classes!("nav-item", if *page == Page::Vault { Some("active") } else { None })} onclick={on_nav_vault}>{"Vault"}</button>
                         <button class={classes!("nav-item", if *page == Page::Generator { Some("active") } else { None })} onclick={on_nav_generator}>{"Generator"}</button>
@@ -1494,6 +1643,14 @@ button:disabled { cursor: not-allowed; }
                                         *unlocked,
                                         sync_label,
                                         last_sync.as_ref().cloned(),
+                                        (*relays).clone(),
+                                        (*relay_input).clone(),
+                                        (*relay_error).clone(),
+                                        (*relay_probes).clone(),
+                                        on_relay_input.clone(),
+                                        on_add_relay.clone(),
+                                        on_remove_relay.clone(),
+                                        on_probe_relays.clone(),
                                     ),
                                 }
                             }
@@ -2009,10 +2166,52 @@ button:disabled { cursor: not-allowed; }
         unlocked: bool,
         sync_label: String,
         last_sync: Option<String>,
+        relays: Vec<String>,
+        relay_input: String,
+        relay_error: Option<String>,
+        relay_probes: Vec<RelayProbe>,
+        on_relay_input: Callback<InputEvent>,
+        on_add_relay: Callback<MouseEvent>,
+        on_remove_relay: Callback<String>,
+        on_probe_relays: Callback<MouseEvent>,
     ) -> Html {
+        let total_relays = relay_probes.len();
+        let reachable_relays = relay_probes
+            .iter()
+            .filter(|probe| probe.state == RelayProbeState::Reachable)
+            .count();
+        let checking_relays = relay_probes
+            .iter()
+            .filter(|probe| probe.state == RelayProbeState::Checking)
+            .count();
+        let relay_health_score = if total_relays == 0 {
+            0.0
+        } else {
+            (reachable_relays as f64 / total_relays as f64) * 100.0
+        };
+        let avg_latency_ms = {
+            let samples: Vec<u32> = relay_probes
+                .iter()
+                .filter_map(|probe| {
+                    if probe.state == RelayProbeState::Reachable {
+                        probe.latency_ms
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            if samples.is_empty() {
+                None
+            } else {
+                let total: u32 = samples.iter().sum();
+                Some(total / samples.len() as u32)
+            }
+        };
+
         html! {
             <>
                 <h2 style="margin:0; font-size:2.2rem; font-family:'Space Grotesk', 'Segoe UI', sans-serif;">{"System Preferences"}</h2>
+                <div class="muted" style="margin-top:4px;">{"Version: 0.1"}</div>
 
                 <div class="section">
                     <div class="detail-label">{"Sync State"}</div>
@@ -2035,6 +2234,81 @@ button:disabled { cursor: not-allowed; }
                     if let Some(ts) = last_sync {
                         <div class="muted" style="margin-top:8px;">{format!("Last sync: {}", format_human_timestamp(&ts))}</div>
                     }
+                </div>
+
+                <div class="section" style="margin-top:12px;">
+                    <div class="row" style="justify-content:space-between;">
+                        <div>
+                            <div class="detail-label">{"Relay Mesh"}</div>
+                            <div class="muted">{format!("{reachable_relays}/{total_relays} reachable")}</div>
+                        </div>
+                        <button class="btn" onclick={on_probe_relays} disabled={!unlocked}>{"Recheck Relays"}</button>
+                    </div>
+                    <div class="row" style="margin-top:10px;">
+                        <span class="strength"><i style={format!("width:{relay_health_score:.1}%;")}></i></span>
+                        <span class="muted">{format!("Health: {relay_health_score:.1}%")}</span>
+                    </div>
+                    <div class="muted" style="margin-top:8px;">
+                        {if checking_relays > 0 {
+                            format!("{checking_relays} relay checks in progress")
+                        } else if let Some(avg) = avg_latency_ms {
+                            format!("Average handshake latency: {avg} ms")
+                        } else {
+                            "No relay latency samples yet".to_string()
+                        }}
+                    </div>
+                    <div style="margin-top:10px;" class="detail-label">{"Configured Relays"}</div>
+                    <div class="row" style="margin-top:6px;">
+                        <input
+                            class="input"
+                            placeholder="wss://relay.example.com"
+                            value={relay_input}
+                            oninput={on_relay_input}
+                        />
+                        <button class="btn" onclick={on_add_relay} disabled={!unlocked}>{"Add"}</button>
+                    </div>
+                    if let Some(err) = relay_error {
+                        <div style="margin-top:6px; color:var(--err); font-size:0.85rem;">{err}</div>
+                    }
+                    <div style="margin-top:8px;">
+                        {for relays.iter().map(|relay| {
+                            let relay_to_remove = relay.clone();
+                            let on_remove_relay = on_remove_relay.clone();
+                            let on_remove = Callback::from(move |_| on_remove_relay.emit(relay_to_remove.clone()));
+                            html! {
+                                <div class="row" style="justify-content:space-between; margin-top:6px; border:1px solid var(--line); border-radius:6px; padding:8px 10px;">
+                                    <div style="font-family:monospace; overflow-wrap:anywhere; font-size:0.85rem;">{relay.clone()}</div>
+                                    <button class="btn danger" onclick={on_remove} disabled={!unlocked}>{"Remove"}</button>
+                                </div>
+                            }
+                        })}
+                    </div>
+                    <div style="margin-top:10px;">
+                        {for relay_probes.iter().map(|probe| {
+                            let status_color = match probe.state {
+                                RelayProbeState::Reachable => "var(--teal)",
+                                RelayProbeState::Unreachable => "var(--err)",
+                                RelayProbeState::Checking => "var(--warn)",
+                            };
+                            let status_text = match probe.state {
+                                RelayProbeState::Reachable => {
+                                    if let Some(latency) = probe.latency_ms {
+                                        format!("Reachable ({latency} ms)")
+                                    } else {
+                                        "Reachable".to_string()
+                                    }
+                                }
+                                RelayProbeState::Unreachable => "Unreachable".to_string(),
+                                RelayProbeState::Checking => "Checking...".to_string(),
+                            };
+                            html! {
+                                <div class="row" style="justify-content:space-between; margin-top:6px; border:1px solid var(--line); border-radius:6px; padding:8px 10px;">
+                                    <div style="font-family:monospace; overflow-wrap:anywhere; font-size:0.85rem;">{probe.relay.clone()}</div>
+                                    <div style={format!("color:{status_color}; font-weight:600; font-size:0.82rem; white-space:nowrap;")}>{status_text}</div>
+                                </div>
+                            }
+                        })}
+                    </div>
                 </div>
 
                 <div class="section" style="margin-top:12px; border-color:#49242a; background:#25171b;">
@@ -2128,9 +2402,127 @@ button:disabled { cursor: not-allowed; }
             .collect()
     }
 
+    fn default_relay_strings() -> Vec<String> {
+        DEFAULT_RELAYS
+            .iter()
+            .map(|relay| relay.to_string())
+            .collect()
+    }
+
+    fn relay_urls_from_strings(relays: &[String]) -> Vec<RelayUrl> {
+        relays
+            .iter()
+            .filter_map(|relay| RelayUrl::parse(relay).ok())
+            .collect()
+    }
+
+    fn default_relay_probes(relays: &[String]) -> Vec<RelayProbe> {
+        relays
+            .iter()
+            .map(|relay| RelayProbe {
+                relay: relay.to_string(),
+                state: RelayProbeState::Checking,
+                latency_ms: None,
+            })
+            .collect()
+    }
+
+    fn probe_relays(relays: Vec<String>, relay_probes: UseStateHandle<Vec<RelayProbe>>) {
+        relay_probes.set(default_relay_probes(&relays));
+        for relay in relays {
+            probe_single_relay(relay, relay_probes.clone());
+        }
+    }
+
+    fn set_relay_probe(
+        relay_probes: UseStateHandle<Vec<RelayProbe>>,
+        relay: &str,
+        state: RelayProbeState,
+        latency_ms: Option<u32>,
+    ) {
+        let mut next = (*relay_probes).clone();
+        if let Some(existing) = next.iter_mut().find(|probe| probe.relay == relay) {
+            existing.state = state;
+            existing.latency_ms = latency_ms;
+            relay_probes.set(next);
+        }
+    }
+
+    fn probe_single_relay(relay: String, relay_probes: UseStateHandle<Vec<RelayProbe>>) {
+        let ws = match WebSocket::new(&relay) {
+            Ok(socket) => Rc::new(socket),
+            Err(_) => {
+                set_relay_probe(relay_probes, &relay, RelayProbeState::Unreachable, None);
+                return;
+            }
+        };
+
+        let started_at = Date::now();
+        let settled = Rc::new(RefCell::new(false));
+        let listeners = Rc::new(RefCell::new(Vec::<EventListener>::new()));
+        let timeout_handle = Rc::new(RefCell::new(None::<Timeout>));
+
+        let finish = {
+            let settled = settled.clone();
+            let relay = relay.clone();
+            let relay_probes = relay_probes.clone();
+            let listeners = listeners.clone();
+            let timeout_handle = timeout_handle.clone();
+            let ws = ws.clone();
+            Rc::new(move |state: RelayProbeState, latency_ms: Option<u32>| {
+                if *settled.borrow() {
+                    return;
+                }
+                *settled.borrow_mut() = true;
+                set_relay_probe(relay_probes.clone(), &relay, state, latency_ms);
+                listeners.borrow_mut().clear();
+                timeout_handle.borrow_mut().take();
+                let _ = ws.close();
+            })
+        };
+
+        {
+            let finish = finish.clone();
+            let ws = ws.clone();
+            listeners
+                .borrow_mut()
+                .push(EventListener::new(ws.as_ref(), "open", move |_| {
+                    let latency = (Date::now() - started_at).max(0.0) as u32;
+                    finish(RelayProbeState::Reachable, Some(latency));
+                }));
+        }
+        {
+            let finish = finish.clone();
+            let ws = ws.clone();
+            listeners
+                .borrow_mut()
+                .push(EventListener::new(ws.as_ref(), "error", move |_| {
+                    finish(RelayProbeState::Unreachable, None);
+                }));
+        }
+        {
+            let finish = finish.clone();
+            let ws = ws.clone();
+            listeners
+                .borrow_mut()
+                .push(EventListener::new(ws.as_ref(), "close", move |_| {
+                    finish(RelayProbeState::Unreachable, None);
+                }));
+        }
+        {
+            let finish = finish.clone();
+            timeout_handle
+                .borrow_mut()
+                .replace(Timeout::new(4_000, move || {
+                    finish(RelayProbeState::Unreachable, None);
+                }));
+        }
+    }
+
     fn spawn_sync(
         signer_credential: String,
         local_entries: Vec<PasswordEntry>,
+        relays: Vec<String>,
         entries_state: UseStateHandle<Vec<PasswordEntry>>,
         sync_state: UseStateHandle<SyncState>,
         last_sync: UseStateHandle<Option<String>>,
@@ -2165,12 +2557,7 @@ button:disabled { cursor: not-allowed; }
                     }
                 };
 
-                match NostrSync::new_with_signer(
-                    signer,
-                    DEFAULT_RELAYS.iter().map(|r| r.to_string()).collect(),
-                )
-                .await
-                {
+                match NostrSync::new_with_signer(signer, relays).await {
                     Ok(v) => {
                         *live_sync.borrow_mut() = Some(v.clone());
                         v
@@ -2228,6 +2615,45 @@ button:disabled { cursor: not-allowed; }
                 let _ = storage.set_item(STORAGE_KEY, &payload);
             }
         }
+    }
+
+    fn load_relays() -> Vec<String> {
+        let Some(storage) = local_storage() else {
+            return default_relay_strings();
+        };
+        let Ok(Some(raw)) = storage.get_item(RELAYS_STORAGE_KEY) else {
+            return default_relay_strings();
+        };
+        let Ok(parsed) = serde_json::from_str::<Vec<String>>(&raw) else {
+            return default_relay_strings();
+        };
+
+        let mut relays: Vec<String> = parsed
+            .iter()
+            .filter_map(|relay| normalize_relay_url(relay))
+            .collect();
+        relays.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
+        if relays.is_empty() {
+            default_relay_strings()
+        } else {
+            relays
+        }
+    }
+
+    fn save_relays(relays: &[String]) {
+        if let Some(storage) = local_storage() {
+            if let Ok(payload) = serde_json::to_string(relays) {
+                let _ = storage.set_item(RELAYS_STORAGE_KEY, &payload);
+            }
+        }
+    }
+
+    fn normalize_relay_url(value: &str) -> Option<String> {
+        let trimmed = value.trim();
+        if !(trimmed.starts_with("wss://") || trimmed.starts_with("ws://")) {
+            return None;
+        }
+        RelayUrl::parse(trimmed).ok().map(|relay| relay.to_string())
     }
 
     fn local_storage() -> Option<web_sys::Storage> {

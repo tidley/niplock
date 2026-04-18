@@ -30,7 +30,7 @@ pub struct PasswordEnvelope {
 impl PasswordEnvelope {
     pub fn from_entry(entry: PasswordEntry) -> Self {
         Self {
-            schema: "passwd.v1".to_string(),
+            schema: "niplock.v1".to_string(),
             entry,
         }
     }

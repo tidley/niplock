@@ -23,7 +23,7 @@ impl LocalStore {
     pub fn new() -> Result<Self> {
         let base = dirs::data_local_dir()
             .unwrap_or_else(|| PathBuf::from("."))
-            .join("passwd");
+            .join("niplock");
         fs::create_dir_all(&base)?;
 
         Ok(Self {

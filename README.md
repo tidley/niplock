@@ -1,4 +1,4 @@
-# NipLock
+# niplock
 
 A Nostr-synced password vault web app.
 
