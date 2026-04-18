@@ -1408,9 +1408,9 @@ button:disabled { cursor: not-allowed; }
                     </div>
 
                     <div class="vault-bottom">
-                        <div class="highlight" style="border-color:#246f5a; background:#17352f;">
-                            <h3 style="margin-top:0; color:#7cf0ca;">{"Rapid Generator"}</h3>
-                            <div class="muted" style="color:#b8e8d8;">{"Create high-entropy randomized keys instantly."}</div>
+                        <div class="highlight">
+                            <h3 style="margin-top:0;">{"Password Generator"}</h3>
+                            <div class="muted">{"Create high-entropy randomized keys instantly."}</div>
                             <div style="margin-top:10px;">
                                 <div class="detail-label">{"Length"}</div>
                                 <div class="row">
