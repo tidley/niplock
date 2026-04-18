@@ -144,6 +144,38 @@ impl NostrSync {
         ))
     }
 
+    pub async fn subscribe_live_updates(&self) -> Result<SubscriptionId> {
+        let filter = Filter::new()
+            .kind(Kind::GiftWrap)
+            .pubkey(self.me)
+            .since(Timestamp::now());
+        let output = self.client.subscribe(filter, None).await?;
+        Ok(output.val)
+    }
+
+    pub async fn wait_for_live_update(&self, subscription_id: &SubscriptionId) -> Result<()> {
+        let sub_id = subscription_id.clone();
+        self.client
+            .handle_notifications(move |notification| {
+                let sub_id = sub_id.clone();
+                async move {
+                    if let RelayPoolNotification::Event {
+                        subscription_id,
+                        event,
+                        ..
+                    } = notification
+                    {
+                        if subscription_id == sub_id && event.kind == Kind::GiftWrap {
+                            return Ok(true);
+                        }
+                    }
+                    Ok(false)
+                }
+            })
+            .await?;
+        Ok(())
+    }
+
     pub async fn shutdown(&self) {
         self.client.shutdown().await;
     }

@@ -5,11 +5,14 @@ fn main() {
 
 #[cfg(target_arch = "wasm32")]
 mod web {
-    use std::collections::HashMap;
+    use std::cell::RefCell;
+    use std::collections::{HashMap, HashSet};
+    use std::rc::Rc;
 
     use chrono::{DateTime, Utc};
     use gloo_events::EventListener;
     use js_sys::Math;
+    use nostr_sdk::prelude::ToBech32;
     use passwd::model::PasswordEntry;
     use passwd::nostr_sync::{NostrSync, signer_from_input};
     use uuid::Uuid;
@@ -99,10 +102,21 @@ button:disabled { cursor: not-allowed; }
   border-bottom: 1px solid var(--line);
   background: #171a21;
   display: grid;
-  grid-template-columns: 1fr auto;
+  grid-template-columns: auto 1fr auto;
   align-items: center;
   gap: 10px;
   padding: 0 16px;
+}
+.menu-btn {
+  display: none;
+  border: 1px solid #2d384b;
+  background: #11151c;
+  color: var(--text);
+  border-radius: 6px;
+  padding: 8px 10px;
+  font-weight: 700;
+  font-size: 1rem;
+  line-height: 1;
 }
 .search {
   max-width: 520px;
@@ -363,6 +377,9 @@ button:disabled { cursor: not-allowed; }
 .corner.idle { background: #39d49e; }
 .corner.syncing { background: #f0c35f; animation: pulse 1s infinite; }
 .corner.error { background: #ef6e6e; }
+.menu-overlay {
+  display: none;
+}
 @keyframes pulse {
   0% { opacity: 0.45; transform: scale(0.85); }
   50% { opacity: 1; transform: scale(1.08); }
@@ -370,7 +387,28 @@ button:disabled { cursor: not-allowed; }
 }
 @media (max-width: 1100px) {
   .app { grid-template-columns: 1fr; }
-  .sidebar { border-right: 0; border-bottom: 1px solid var(--line); }
+  .sidebar {
+    position: fixed;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    width: 270px;
+    border-right: 1px solid var(--line);
+    border-bottom: 0;
+    z-index: 120;
+    transform: translateX(-100%);
+    transition: transform 180ms ease-out;
+    overflow-y: auto;
+  }
+  .sidebar.mobile-open { transform: translateX(0); }
+  .menu-btn { display: inline-block; }
+  .menu-overlay {
+    display: block;
+    position: fixed;
+    inset: 0;
+    background: rgba(7, 10, 16, 0.55);
+    z-index: 110;
+  }
   .explorer-head { grid-template-columns: 1fr; }
   .vault-bottom, .detail-grid, .generator-grid { grid-template-columns: 1fr; }
   .audit-grid, .settings-grid { grid-template-columns: 1fr; }
@@ -426,15 +464,20 @@ button:disabled { cursor: not-allowed; }
         let detail_secret_visible = use_state(|| false);
 
         let signer_credential = use_state(String::new);
+        let active_npub = use_state(|| None::<String>);
         let unlock_input = use_state(String::new);
         let unlock_error = use_state(|| None::<String>);
         let unlock_panel_open = use_state(|| false);
         let unlock_method = use_state(|| UnlockMethod::Nsec);
         let unlocked = use_state(|| false);
+        let mobile_menu_open = use_state(|| false);
 
         let sync_state = use_state(|| SyncState::Idle);
         let last_sync = use_state(|| None::<String>);
         let sync_in_flight = use_state(|| false);
+        let live_sync = use_mut_ref(|| None::<NostrSync>);
+        let live_subscription_id = use_mut_ref(|| None::<nostr_sdk::prelude::SubscriptionId>);
+        let live_listener_running = use_mut_ref(|| false);
         let copy_notice = use_state(|| None::<String>);
 
         let gen_len = use_state(|| 18usize);
@@ -445,6 +488,8 @@ button:disabled { cursor: not-allowed; }
         let generated = use_state(|| generate_password(18, true, true, true, true));
 
         {
+            let page = page.clone();
+            let draft = draft.clone();
             let generated = generated.clone();
             let gen_len = gen_len.clone();
             let gen_upper = gen_upper.clone();
@@ -452,15 +497,28 @@ button:disabled { cursor: not-allowed; }
             let gen_numbers = gen_numbers.clone();
             let gen_symbols = gen_symbols.clone();
             use_effect_with(
-                (*gen_len, *gen_upper, *gen_lower, *gen_numbers, *gen_symbols),
+                (
+                    (*page).clone(),
+                    *gen_len,
+                    *gen_upper,
+                    *gen_lower,
+                    *gen_numbers,
+                    *gen_symbols,
+                ),
                 move |_| {
-                    generated.set(generate_password(
+                    let next_secret = generate_password(
                         *gen_len,
                         *gen_upper,
                         *gen_lower,
                         *gen_numbers,
                         *gen_symbols,
-                    ));
+                    );
+                    generated.set(next_secret.clone());
+                    if *page == Page::AddEntry {
+                        let mut next = (*draft).clone();
+                        next.secret = next_secret;
+                        draft.set(next);
+                    }
                     || ()
                 },
             );
@@ -472,6 +530,7 @@ button:disabled { cursor: not-allowed; }
             let sync_state = sync_state.clone();
             let last_sync = last_sync.clone();
             let sync_in_flight = sync_in_flight.clone();
+            let live_sync = live_sync.clone();
             let unlocked = unlocked.clone();
             use_effect_with((), move |_| {
                 let doc_listener = window().and_then(|w| w.document()).map(|doc| {
@@ -480,6 +539,7 @@ button:disabled { cursor: not-allowed; }
                     let sync_state = sync_state.clone();
                     let last_sync = last_sync.clone();
                     let sync_in_flight = sync_in_flight.clone();
+                    let live_sync = live_sync.clone();
                     let unlocked = unlocked.clone();
                     EventListener::new(&doc, "visibilitychange", move |_| {
                         if *unlocked {
@@ -492,6 +552,7 @@ button:disabled { cursor: not-allowed; }
                                         sync_state.clone(),
                                         last_sync.clone(),
                                         sync_in_flight.clone(),
+                                        live_sync.clone(),
                                     );
                                 }
                             }
@@ -505,6 +566,7 @@ button:disabled { cursor: not-allowed; }
                     let sync_state = sync_state.clone();
                     let last_sync = last_sync.clone();
                     let sync_in_flight = sync_in_flight.clone();
+                    let live_sync = live_sync.clone();
                     let unlocked = unlocked.clone();
                     EventListener::new(&win, "pagehide", move |_| {
                         if *unlocked {
@@ -515,6 +577,7 @@ button:disabled { cursor: not-allowed; }
                                 sync_state.clone(),
                                 last_sync.clone(),
                                 sync_in_flight.clone(),
+                                live_sync.clone(),
                             );
                         }
                     })
@@ -526,6 +589,98 @@ button:disabled { cursor: not-allowed; }
                 }
             });
         }
+
+        let start_live_listener = {
+            let signer_credential = signer_credential.clone();
+            let entries = entries.clone();
+            let sync_state = sync_state.clone();
+            let last_sync = last_sync.clone();
+            let sync_in_flight = sync_in_flight.clone();
+            let live_sync = live_sync.clone();
+            let live_subscription_id = live_subscription_id.clone();
+            let live_listener_running = live_listener_running.clone();
+            let unlocked = unlocked.clone();
+            Callback::from(move |_| {
+                if *live_listener_running.borrow() {
+                    return;
+                }
+                *live_listener_running.borrow_mut() = true;
+
+                let signer_credential = signer_credential.clone();
+                let entries = entries.clone();
+                let sync_state = sync_state.clone();
+                let last_sync = last_sync.clone();
+                let sync_in_flight = sync_in_flight.clone();
+                let live_sync = live_sync.clone();
+                let live_subscription_id = live_subscription_id.clone();
+                let live_listener_running = live_listener_running.clone();
+                let unlocked = unlocked.clone();
+                spawn_local(async move {
+                    loop {
+                        if !*unlocked || !*live_listener_running.borrow() {
+                            break;
+                        }
+
+                        let sync = if let Some(existing) = live_sync.borrow().clone() {
+                            existing
+                        } else {
+                            let signer = match signer_from_input((*signer_credential).as_str()) {
+                                Ok(v) => v,
+                                Err(_) => break,
+                            };
+
+                            match NostrSync::new_with_signer(
+                                signer,
+                                DEFAULT_RELAYS.iter().map(|r| r.to_string()).collect(),
+                            )
+                            .await
+                            {
+                                Ok(v) => {
+                                    *live_sync.borrow_mut() = Some(v.clone());
+                                    v
+                                }
+                                Err(_) => break,
+                            }
+                        };
+
+                        if live_subscription_id.borrow().is_none() {
+                            match sync.subscribe_live_updates().await {
+                                Ok(sub_id) => {
+                                    *live_subscription_id.borrow_mut() = Some(sub_id);
+                                }
+                                Err(_) => break,
+                            }
+                        }
+
+                        let Some(sub_id) = live_subscription_id.borrow().clone() else {
+                            break;
+                        };
+
+                        if sync.wait_for_live_update(&sub_id).await.is_err() {
+                            *live_sync.borrow_mut() = None;
+                            *live_subscription_id.borrow_mut() = None;
+                            break;
+                        }
+
+                        if !*unlocked || !*live_listener_running.borrow() {
+                            break;
+                        }
+
+                        spawn_sync(
+                            (*signer_credential).clone(),
+                            (*entries).clone(),
+                            entries.clone(),
+                            sync_state.clone(),
+                            last_sync.clone(),
+                            sync_in_flight.clone(),
+                            live_sync.clone(),
+                        );
+                    }
+
+                    *live_listener_running.borrow_mut() = false;
+                });
+            })
+        };
 
         let filtered_entries: Vec<PasswordEntry> = if *unlocked {
             let q = search.trim().to_ascii_lowercase();
@@ -557,19 +712,35 @@ button:disabled { cursor: not-allowed; }
 
         let on_nav_vault = {
             let page = page.clone();
-            Callback::from(move |_| page.set(Page::Vault))
+            let mobile_menu_open = mobile_menu_open.clone();
+            Callback::from(move |_| {
+                page.set(Page::Vault);
+                mobile_menu_open.set(false);
+            })
         };
         let on_nav_generator = {
             let page = page.clone();
-            Callback::from(move |_| page.set(Page::Generator))
+            let mobile_menu_open = mobile_menu_open.clone();
+            Callback::from(move |_| {
+                page.set(Page::Generator);
+                mobile_menu_open.set(false);
+            })
         };
         let on_nav_audit = {
             let page = page.clone();
-            Callback::from(move |_| page.set(Page::SecurityAudit))
+            let mobile_menu_open = mobile_menu_open.clone();
+            Callback::from(move |_| {
+                page.set(Page::SecurityAudit);
+                mobile_menu_open.set(false);
+            })
         };
         let on_nav_settings = {
             let page = page.clone();
-            Callback::from(move |_| page.set(Page::Settings))
+            let mobile_menu_open = mobile_menu_open.clone();
+            Callback::from(move |_| {
+                page.set(Page::Settings);
+                mobile_menu_open.set(false);
+            })
         };
 
         let on_add_item = {
@@ -579,6 +750,7 @@ button:disabled { cursor: not-allowed; }
             let selected_id = selected_id.clone();
             let show_secret = show_secret.clone();
             let unlocked = unlocked.clone();
+            let mobile_menu_open = mobile_menu_open.clone();
             Callback::from(move |_| {
                 if !*unlocked {
                     return;
@@ -588,7 +760,17 @@ button:disabled { cursor: not-allowed; }
                 draft.set(Draft::default());
                 show_secret.set(false);
                 editor_open.set(true);
+                mobile_menu_open.set(false);
             })
+        };
+
+        let on_toggle_mobile_menu = {
+            let mobile_menu_open = mobile_menu_open.clone();
+            Callback::from(move |_| mobile_menu_open.set(!*mobile_menu_open))
+        };
+        let on_close_mobile_menu = {
+            let mobile_menu_open = mobile_menu_open.clone();
+            Callback::from(move |_| mobile_menu_open.set(false))
         };
 
         let on_search = {
@@ -603,17 +785,33 @@ button:disabled { cursor: not-allowed; }
             let unlock_panel_open = unlock_panel_open.clone();
             let unlocked = unlocked.clone();
             let unlock_error = unlock_error.clone();
+            let active_npub = active_npub.clone();
             let entries = entries.clone();
             let selected_id = selected_id.clone();
             let editor_open = editor_open.clone();
+            let live_sync = live_sync.clone();
+            let live_subscription_id = live_subscription_id.clone();
+            let live_listener_running = live_listener_running.clone();
             Callback::from(move |_| {
                 if *unlocked {
                     unlocked.set(false);
                     unlock_panel_open.set(false);
                     unlock_error.set(None);
+                    active_npub.set(None);
                     entries.set(vec![]);
                     selected_id.set(None);
                     editor_open.set(false);
+                    *live_listener_running.borrow_mut() = false;
+                    *live_subscription_id.borrow_mut() = None;
+                    {
+                        let live_sync = live_sync.clone();
+                        spawn_local(async move {
+                            let current = live_sync.borrow_mut().take();
+                            if let Some(sync) = current {
+                                sync.shutdown().await;
+                            }
+                        });
+                    }
                 } else {
                     unlock_panel_open.set(!*unlock_panel_open);
                 }
@@ -645,6 +843,7 @@ button:disabled { cursor: not-allowed; }
             let unlock_input = unlock_input.clone();
             let unlock_method = unlock_method.clone();
             let signer_credential = signer_credential.clone();
+            let active_npub = active_npub.clone();
             let unlocked = unlocked.clone();
             let unlock_error = unlock_error.clone();
             let unlock_panel_open = unlock_panel_open.clone();
@@ -652,6 +851,8 @@ button:disabled { cursor: not-allowed; }
             let sync_state = sync_state.clone();
             let last_sync = last_sync.clone();
             let sync_in_flight = sync_in_flight.clone();
+            let live_sync = live_sync.clone();
+            let start_live_listener = start_live_listener.clone();
             Callback::from(move |_| {
                 let credential = match &*unlock_method {
                     UnlockMethod::Nip07 => "nip07".to_string(),
@@ -659,8 +860,18 @@ button:disabled { cursor: not-allowed; }
                 };
 
                 match signer_from_input(&credential) {
-                    Ok(_) => {
+                    Ok(signer) => {
                         signer_credential.set(credential.clone());
+                        {
+                            let active_npub = active_npub.clone();
+                            spawn_local(async move {
+                                let next = match signer.get_public_key().await {
+                                    Ok(pubkey) => pubkey.to_bech32().ok(),
+                                    Err(_) => None,
+                                };
+                                active_npub.set(next);
+                            });
+                        }
                         unlocked.set(true);
                         unlock_error.set(None);
                         unlock_panel_open.set(false);
@@ -671,7 +882,9 @@ button:disabled { cursor: not-allowed; }
                             sync_state.clone(),
                             last_sync.clone(),
                             sync_in_flight.clone(),
+                            live_sync.clone(),
                         );
+                        start_live_listener.emit(());
                     }
                     Err(err) => {
                         unlock_error.set(Some(format!("Invalid signer credential: {err}")));
@@ -686,6 +899,7 @@ button:disabled { cursor: not-allowed; }
             let sync_state = sync_state.clone();
             let last_sync = last_sync.clone();
             let sync_in_flight = sync_in_flight.clone();
+            let live_sync = live_sync.clone();
             let unlocked = unlocked.clone();
             Callback::from(move |_| {
                 if *unlocked {
@@ -696,6 +910,7 @@ button:disabled { cursor: not-allowed; }
                         sync_state.clone(),
                         last_sync.clone(),
                         sync_in_flight.clone(),
+                        live_sync.clone(),
                     );
                 }
             })
@@ -707,6 +922,7 @@ button:disabled { cursor: not-allowed; }
             let sync_state = sync_state.clone();
             let last_sync = last_sync.clone();
             let sync_in_flight = sync_in_flight.clone();
+            let live_sync = live_sync.clone();
             let unlocked = unlocked.clone();
             Callback::from(move |current_entries: Vec<PasswordEntry>| {
                 if *unlocked {
@@ -717,6 +933,7 @@ button:disabled { cursor: not-allowed; }
                         sync_state.clone(),
                         last_sync.clone(),
                         sync_in_flight.clone(),
+                        live_sync.clone(),
                     );
                 }
             })
@@ -965,7 +1182,7 @@ button:disabled { cursor: not-allowed; }
                 <style>{CSS}</style>
                 <div class={corner_class}></div>
                 <div class="app">
-                    <aside class="sidebar">
+                    <aside class={classes!("sidebar", if *mobile_menu_open { Some("mobile-open") } else { None })}>
                         <div class="brand">
                             <h1>{"NipLock"}</h1>
                         </div>
@@ -976,9 +1193,13 @@ button:disabled { cursor: not-allowed; }
                         <div class="side-spacer"></div>
                         <button class="side-add" onclick={on_add_item.clone()}>{"+ Add Item"}</button>
                     </aside>
+                    if *mobile_menu_open {
+                        <div class="menu-overlay" onclick={on_close_mobile_menu}></div>
+                    }
 
                     <section class="main">
                         <header class="top">
+                            <button class="menu-btn" onclick={on_toggle_mobile_menu}>{"☰"}</button>
                             <input class="search" placeholder="Search vault..." value={(*search).clone()} oninput={on_search} />
                             <div class="top-right">
                                 <button class="btn" onclick={on_sync_now.clone()} disabled={!*unlocked}>{"Refresh"}</button>
@@ -1101,6 +1322,7 @@ button:disabled { cursor: not-allowed; }
                                     Page::SecurityAudit => render_audit_page(&entries, weak_count, health_score),
                                     Page::Settings => render_settings_page(
                                         (*signer_credential).clone(),
+                                        (*active_npub).clone(),
                                         *unlocked,
                                         sync_label,
                                         last_sync.as_ref().cloned(),
@@ -1488,7 +1710,7 @@ button:disabled { cursor: not-allowed; }
                     </div>
                     <div class="row" style="margin-top:8px;">
                         <span class="strength"><i style={format!("width:{}%", (draft_bits / 1.2).min(100.0))}></i></span>
-                        <span class="muted">{format!("Current password entropy: {draft_bits:.1} bits ({})", strength_label(draft_bits))}</span>
+                        <span class="muted">{format!("Entropy: {draft_bits:.1} bits ({})", strength_label(draft_bits))}</span>
                     </div>
                     <textarea class="textarea" placeholder="Notes" value={draft.notes.clone()} oninput={on_draft_notes}></textarea>
                     <div class="row" style="justify-content:flex-end; margin-top: 8px;">
@@ -1617,6 +1839,7 @@ button:disabled { cursor: not-allowed; }
 
     fn render_settings_page(
         signer_credential: String,
+        active_npub: Option<String>,
         unlocked: bool,
         sync_label: String,
         last_sync: Option<String>,
@@ -1634,6 +1857,12 @@ button:disabled { cursor: not-allowed; }
                 <div class="section" style="margin-top:12px;">
                     <div class="detail-label">{"Nostr Credentials"}</div>
                     <div class="muted">{"Loaded in session only"}</div>
+                    <div style="margin-top:8px;">
+                        <div class="detail-label">{"Current npub"}</div>
+                        <div style="font-family: monospace; overflow-wrap:anywhere;">
+                            {active_npub.unwrap_or_else(|| "(not available)".to_string())}
+                        </div>
+                    </div>
                     <div style="margin-top:8px; font-family: monospace;">
                         {if signer_credential.is_empty() { "(not loaded)".to_string() } else { "signer••••••••••••••••".to_string() }}
                     </div>
@@ -1662,23 +1891,25 @@ button:disabled { cursor: not-allowed; }
     }
 
     fn entropy_bits(secret: &str) -> f64 {
-        let mut charset = 0usize;
-        if secret.chars().any(|c| c.is_ascii_uppercase()) {
-            charset += 26;
-        }
-        if secret.chars().any(|c| c.is_ascii_lowercase()) {
-            charset += 26;
-        }
-        if secret.chars().any(|c| c.is_ascii_digit()) {
-            charset += 10;
-        }
-        if secret.chars().any(|c| !c.is_ascii_alphanumeric()) {
-            charset += 32;
-        }
-        if charset == 0 {
+        if secret.is_empty() {
             return 0.0;
         }
-        (secret.len() as f64) * (charset as f64).log2()
+        let chars: Vec<char> = secret.chars().collect();
+        let len = chars.len() as f64;
+        if len == 0.0 {
+            return 0.0;
+        }
+
+        let unique: HashSet<char> = chars.iter().copied().collect();
+        unique
+            .iter()
+            .map(|ch| {
+                let count = chars.iter().filter(|c| **c == *ch).count() as f64;
+                let p = count / len;
+                -p * p.log2()
+            })
+            .sum::<f64>()
+            * len
     }
 
     fn format_human_timestamp(ts: &str) -> String {
@@ -1731,6 +1962,7 @@ button:disabled { cursor: not-allowed; }
         sync_state: UseStateHandle<SyncState>,
         last_sync: UseStateHandle<Option<String>>,
         sync_in_flight: UseStateHandle<bool>,
+        live_sync: Rc<RefCell<Option<NostrSync>>>,
     ) {
         if *sync_in_flight {
             return;
@@ -1748,26 +1980,33 @@ button:disabled { cursor: not-allowed; }
                 return;
             }
 
-            let signer = match signer_from_input(&signer_credential) {
-                Ok(v) => v,
-                Err(err) => {
-                    sync_state.set(SyncState::Error(format!("invalid signer: {err}")));
-                    sync_in_flight.set(false);
-                    return;
-                }
-            };
+            let sync = if let Some(existing) = live_sync.borrow().clone() {
+                existing
+            } else {
+                let signer = match signer_from_input(&signer_credential) {
+                    Ok(v) => v,
+                    Err(err) => {
+                        sync_state.set(SyncState::Error(format!("invalid signer: {err}")));
+                        sync_in_flight.set(false);
+                        return;
+                    }
+                };
 
-            let sync = match NostrSync::new_with_signer(
-                signer,
-                DEFAULT_RELAYS.iter().map(|r| r.to_string()).collect(),
-            )
-            .await
-            {
-                Ok(v) => v,
-                Err(err) => {
-                    sync_state.set(SyncState::Error(format!("relay connect failed: {err}")));
-                    sync_in_flight.set(false);
-                    return;
+                match NostrSync::new_with_signer(
+                    signer,
+                    DEFAULT_RELAYS.iter().map(|r| r.to_string()).collect(),
+                )
+                .await
+                {
+                    Ok(v) => {
+                        *live_sync.borrow_mut() = Some(v.clone());
+                        v
+                    }
+                    Err(err) => {
+                        sync_state.set(SyncState::Error(format!("relay connect failed: {err}")));
+                        sync_in_flight.set(false);
+                        return;
+                    }
                 }
             };
 
@@ -1781,11 +2020,10 @@ button:disabled { cursor: not-allowed; }
                     sync_state.set(SyncState::Idle);
                 }
                 Err(err) => {
+                    *live_sync.borrow_mut() = None;
                     sync_state.set(SyncState::Error(format!("sync failed: {err}")));
                 }
             }
-
-            sync.shutdown().await;
             sync_in_flight.set(false);
         });
     }
