@@ -1064,6 +1064,16 @@ button:disabled { cursor: not-allowed; }
                                     Page::AddEntry => render_add_entry_page(
                                         &draft,
                                         *show_secret,
+                                        *gen_len,
+                                        *gen_upper,
+                                        *gen_lower,
+                                        *gen_numbers,
+                                        *gen_symbols,
+                                        on_gen_len,
+                                        on_gen_upper,
+                                        on_gen_lower,
+                                        on_gen_numbers,
+                                        on_gen_symbols,
                                         on_draft_service,
                                         on_draft_username,
                                         on_draft_secret,
@@ -1429,6 +1439,16 @@ button:disabled { cursor: not-allowed; }
     fn render_add_entry_page(
         draft: &UseStateHandle<Draft>,
         show_secret: bool,
+        gen_len: usize,
+        gen_upper: bool,
+        gen_lower: bool,
+        gen_numbers: bool,
+        gen_symbols: bool,
+        on_gen_len: Callback<InputEvent>,
+        on_gen_upper: Callback<Event>,
+        on_gen_lower: Callback<Event>,
+        on_gen_numbers: Callback<Event>,
+        on_gen_symbols: Callback<Event>,
         on_draft_service: Callback<InputEvent>,
         on_draft_username: Callback<InputEvent>,
         on_draft_secret: Callback<InputEvent>,
@@ -1448,6 +1468,17 @@ button:disabled { cursor: not-allowed; }
                         <input class="input" type={if show_secret { "text" } else { "password" }} placeholder="Password" value={draft.secret.clone()} oninput={on_draft_secret}/>
                         <button class="btn" onclick={on_toggle_form_secret}>{"👁"}</button>
                         <button class="btn" onclick={on_generate_and_fill}>{"Generate"}</button>
+                    </div>
+                    <div class="detail-label" style="margin-top:10px;">{"Password Generator Controls"}</div>
+                    <div class="row">
+                        <input class="range" type="range" min="8" max="128" value={gen_len.to_string()} oninput={on_gen_len}/>
+                        <strong>{gen_len}</strong>
+                    </div>
+                    <div class="row" style="flex-wrap:wrap; margin-top:8px;">
+                        <label class="row"><input type="checkbox" checked={gen_upper} onchange={on_gen_upper}/><span>{"A-Z"}</span></label>
+                        <label class="row"><input type="checkbox" checked={gen_lower} onchange={on_gen_lower}/><span>{"a-z"}</span></label>
+                        <label class="row"><input type="checkbox" checked={gen_numbers} onchange={on_gen_numbers}/><span>{"0-9"}</span></label>
+                        <label class="row"><input type="checkbox" checked={gen_symbols} onchange={on_gen_symbols}/><span>{"!@#"}</span></label>
                     </div>
                     <textarea class="textarea" placeholder="Notes" value={draft.notes.clone()} oninput={on_draft_notes}></textarea>
                     <div class="row" style="justify-content:flex-end; margin-top: 8px;">
