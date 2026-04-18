@@ -7,7 +7,7 @@ fn main() {
 mod web {
     use std::collections::HashMap;
 
-    use chrono::Utc;
+    use chrono::{DateTime, Utc};
     use gloo_events::EventListener;
     use js_sys::Math;
     use passwd::model::PasswordEntry;
@@ -63,14 +63,6 @@ button:disabled { cursor: not-allowed; }
   font-size: 1.35rem;
   letter-spacing: 0.03em;
 }
-.brand p {
-  margin: 4px 0 0 0;
-  color: var(--teal);
-  font-size: 0.66rem;
-  letter-spacing: 0.11em;
-  text-transform: uppercase;
-  font-weight: 700;
-}
 .nav-item {
   width: 100%;
   text-align: left;
@@ -97,13 +89,6 @@ button:disabled { cursor: not-allowed; }
   border-radius: 8px;
   padding: 10px;
   font-weight: 700;
-}
-.side-user {
-  border: 1px solid var(--line);
-  background: #1b202a;
-  border-radius: 8px;
-  padding: 8px;
-  font-size: 0.85rem;
 }
 .main {
   display: flex;
@@ -457,6 +442,28 @@ button:disabled { cursor: not-allowed; }
         let gen_numbers = use_state(|| true);
         let gen_symbols = use_state(|| true);
         let generated = use_state(|| generate_password(18, true, true, true, true));
+
+        {
+            let generated = generated.clone();
+            let gen_len = gen_len.clone();
+            let gen_upper = gen_upper.clone();
+            let gen_lower = gen_lower.clone();
+            let gen_numbers = gen_numbers.clone();
+            let gen_symbols = gen_symbols.clone();
+            use_effect_with(
+                (*gen_len, *gen_upper, *gen_lower, *gen_numbers, *gen_symbols),
+                move |_| {
+                    generated.set(generate_password(
+                        *gen_len,
+                        *gen_upper,
+                        *gen_lower,
+                        *gen_numbers,
+                        *gen_symbols,
+                    ));
+                    || ()
+                },
+            );
+        }
 
         {
             let entries = entries.clone();
@@ -823,7 +830,7 @@ button:disabled { cursor: not-allowed; }
             Callback::from(move |e: InputEvent| {
                 let input: HtmlInputElement = e.target_unchecked_into();
                 if let Ok(v) = input.value().parse::<usize>() {
-                    gen_len.set(v.clamp(8, 64));
+                    gen_len.set(v.clamp(8, 128));
                 }
             })
         };
@@ -955,8 +962,7 @@ button:disabled { cursor: not-allowed; }
                 <div class="app">
                     <aside class="sidebar">
                         <div class="brand">
-                            <h1>{"THE VAULT"}</h1>
-                            <p>{"Monolithic Precision"}</p>
+                            <h1>{"NipLock"}</h1>
                         </div>
                         <button class={classes!("nav-item", if *page == Page::Vault { Some("active") } else { None })} onclick={on_nav_vault}>{"Vault"}</button>
                         <button class={classes!("nav-item", if *page == Page::Generator { Some("active") } else { None })} onclick={on_nav_generator}>{"Generator"}</button>
@@ -964,10 +970,6 @@ button:disabled { cursor: not-allowed; }
                         <button class={classes!("nav-item", if *page == Page::Settings { Some("active") } else { None })} onclick={on_nav_settings}>{"Settings"}</button>
                         <div class="side-spacer"></div>
                         <button class="side-add" onclick={on_add_item.clone()}>{"+ Add Item"}</button>
-                        <div class="side-user">
-                            <div>{"Admin.01"}</div>
-                            <div class="muted">{"System Access"}</div>
-                        </div>
                     </aside>
 
                     <section class="main">
@@ -1302,7 +1304,11 @@ button:disabled { cursor: not-allowed; }
                             </div>
                             <div class="stat">
                                 <div class="k">{"Last Sync"}</div>
-                                <div class="v" style="font-size:1.3rem;">{last_sync.unwrap_or_else(|| "Never".to_string())}</div>
+                                <div class="v" style="font-size:1.3rem;">{
+                                    last_sync
+                                        .map(|ts| format_human_timestamp(&ts))
+                                        .unwrap_or_else(|| "Never".to_string())
+                                }</div>
                             </div>
                         </div>
                     </div>
@@ -1389,7 +1395,7 @@ button:disabled { cursor: not-allowed; }
                             <div style="margin-top:10px;">
                                 <div class="detail-label">{"Length"}</div>
                                 <div class="row">
-                                    <input class="range" type="range" min="8" max="64" value={gen_len.to_string()} oninput={on_gen_len}/>
+                                    <input class="range" type="range" min="8" max="128" value={gen_len.to_string()} oninput={on_gen_len}/>
                                     <strong>{gen_len}</strong>
                                 </div>
                                 <div class="row" style="flex-wrap:wrap; margin-top:8px;">
@@ -1449,16 +1455,15 @@ button:disabled { cursor: not-allowed; }
         html! {
             <>
                 <h2 style="margin:0; font-size:2.2rem; font-family:'Space Grotesk', 'Segoe UI', sans-serif;">{"Generator"}</h2>
-                <div class="muted" style="margin: 6px 0 12px 0;">{"Utilize high-entropy algorithms to create impenetrable cryptographic keys."}</div>
 
                 <div class="section" style="margin-bottom:12px;">
                     <div class="detail-label">{"Generated Secret"}</div>
-                    <div class="row" style="justify-content: space-between;">
-                        <div style="font-size:2.4rem; font-family: 'JetBrains Mono', monospace; letter-spacing: 0.05em;">{generated.clone()}</div>
-                        <div class="row">
-                            <button class="btn" onclick={on_copy_generated.clone()}>{"Copy"}</button>
-                            <button class="btn" onclick={on_generate.clone()}>{"Regenerate"}</button>
-                        </div>
+                    <div style="font-size:1rem; font-family:'JetBrains Mono', monospace; overflow-wrap:anywhere; word-break:break-word; white-space:normal;">
+                        {generated.clone()}
+                    </div>
+                    <div class="row" style="margin-top:10px;">
+                        <button class="btn" onclick={on_copy_generated.clone()}>{"Copy"}</button>
+                        <button class="btn" onclick={on_generate.clone()}>{"Regenerate"}</button>
                     </div>
                 </div>
 
@@ -1466,7 +1471,7 @@ button:disabled { cursor: not-allowed; }
                     <div class="section">
                         <div class="detail-label">{"Character Length"}</div>
                         <div style="font-size: 2.6rem; font-weight:700; color: var(--teal);">{gen_len}</div>
-                        <input class="range" type="range" min="8" max="64" value={gen_len.to_string()} oninput={on_gen_len} />
+                        <input class="range" type="range" min="8" max="128" value={gen_len.to_string()} oninput={on_gen_len} />
 
                         <div style="margin-top: 16px;" class="detail-label">{"Inclusion Parameters"}</div>
                         <div class="row" style="margin:8px 0;"><input type="checkbox" checked={gen_upper} onchange={on_gen_upper}/><span>{"Uppercase"}</span></div>
@@ -1554,19 +1559,11 @@ button:disabled { cursor: not-allowed; }
         html! {
             <>
                 <h2 style="margin:0; font-size:2.2rem; font-family:'Space Grotesk', 'Segoe UI', sans-serif;">{"System Preferences"}</h2>
-                <div class="muted" style="margin:6px 0 12px 0;">{"Configure your cryptographic environment"}</div>
 
-                <div class="settings-grid">
-                    <div class="section">
-                        <div class="detail-label">{"Account Profile"}</div>
-                        <div style="font-size:1.25rem; font-weight:700;">{"Admin.01"}</div>
-                        <div class="muted">{"Primary Vault Owner"}</div>
-                    </div>
-                    <div class="section">
-                        <div class="detail-label">{"Sync State"}</div>
-                        <div style="font-size:1.25rem; font-weight:700; color:var(--teal);">{if unlocked { "Unlocked" } else { "Locked" }}</div>
-                        <div class="muted">{sync_label}</div>
-                    </div>
+                <div class="section">
+                    <div class="detail-label">{"Sync State"}</div>
+                    <div style="font-size:1.25rem; font-weight:700; color:var(--teal);">{if unlocked { "Unlocked" } else { "Locked" }}</div>
+                    <div class="muted">{sync_label}</div>
                 </div>
 
                 <div class="section" style="margin-top:12px;">
@@ -1576,7 +1573,7 @@ button:disabled { cursor: not-allowed; }
                         {if signer_credential.is_empty() { "(not loaded)".to_string() } else { "signer••••••••••••••••".to_string() }}
                     </div>
                     if let Some(ts) = last_sync {
-                        <div class="muted" style="margin-top:8px;">{format!("Last sync: {ts}")}</div>
+                        <div class="muted" style="margin-top:8px;">{format!("Last sync: {}", format_human_timestamp(&ts))}</div>
                     }
                 </div>
 
@@ -1617,6 +1614,16 @@ button:disabled { cursor: not-allowed; }
             return 0.0;
         }
         (secret.len() as f64) * (charset as f64).log2()
+    }
+
+    fn format_human_timestamp(ts: &str) -> String {
+        match DateTime::parse_from_rfc3339(ts) {
+            Ok(parsed) => parsed
+                .with_timezone(&Utc)
+                .format("%b %d, %Y %H:%M UTC")
+                .to_string(),
+            Err(_) => ts.to_string(),
+        }
     }
 
     fn generate_password(
