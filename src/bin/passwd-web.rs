@@ -41,6 +41,7 @@ body {
   background: var(--bg);
   color: var(--text);
   font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
+  overflow-x: hidden;
 }
 button { cursor: pointer; }
 button:disabled { cursor: not-allowed; }
@@ -96,13 +97,14 @@ button:disabled { cursor: not-allowed; }
 .main {
   display: flex;
   flex-direction: column;
+  min-width: 0;
 }
 .top {
   height: 58px;
   border-bottom: 1px solid var(--line);
   background: #171a21;
   display: grid;
-  grid-template-columns: auto 1fr auto;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
   gap: 10px;
   padding: 0 16px;
@@ -119,8 +121,9 @@ button:disabled { cursor: not-allowed; }
   line-height: 1;
 }
 .search {
-  max-width: 520px;
+  max-width: none;
   width: 100%;
+  min-width: 0;
   background: #0f1218;
   border: 1px solid #262d3a;
   color: var(--text);
@@ -131,6 +134,7 @@ button:disabled { cursor: not-allowed; }
   display: flex;
   align-items: center;
   gap: 10px;
+  justify-self: end;
 }
 .icon {
   color: var(--muted);
@@ -172,6 +176,7 @@ button:disabled { cursor: not-allowed; }
 }
 .page {
   padding: 16px;
+  min-width: 0;
 }
 .section {
   border: 1px solid var(--line);
@@ -401,6 +406,7 @@ button:disabled { cursor: not-allowed; }
     overflow-y: auto;
   }
   .sidebar.mobile-open { transform: translateX(0); }
+  .top { grid-template-columns: auto minmax(0, 1fr) auto; }
   .menu-btn { display: inline-block; }
   .menu-overlay {
     display: block;
