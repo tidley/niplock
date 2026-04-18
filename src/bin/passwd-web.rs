@@ -259,7 +259,7 @@ button:disabled { cursor: not-allowed; }
 .vault-bottom {
   margin-top: 12px;
   display: grid;
-  grid-template-columns: 1fr 280px;
+  grid-template-columns: 1fr;
   gap: 12px;
 }
 .highlight {
@@ -387,6 +387,7 @@ button:disabled { cursor: not-allowed; }
     #[derive(Clone, PartialEq)]
     enum Page {
         Vault,
+        AddEntry,
         Generator,
         SecurityAudit,
         Settings,
@@ -582,7 +583,7 @@ button:disabled { cursor: not-allowed; }
                 if !*unlocked {
                     return;
                 }
-                page.set(Page::Vault);
+                page.set(Page::AddEntry);
                 selected_id.set(None);
                 draft.set(Draft::default());
                 show_secret.set(false);
@@ -767,6 +768,7 @@ button:disabled { cursor: not-allowed; }
             let entries = entries.clone();
             let draft = draft.clone();
             let editor_open = editor_open.clone();
+            let page = page.clone();
             let selected_id = selected_id.clone();
             let on_entries_modified = on_entries_modified.clone();
             Callback::from(move |_| {
@@ -806,6 +808,7 @@ button:disabled { cursor: not-allowed; }
                 entries.set(next.clone());
                 selected_id.set(Some(id));
                 editor_open.set(false);
+                page.set(Page::Vault);
                 draft.set(Draft::default());
                 on_entries_modified.emit(next);
             })
@@ -814,8 +817,10 @@ button:disabled { cursor: not-allowed; }
         let on_cancel_draft = {
             let editor_open = editor_open.clone();
             let draft = draft.clone();
+            let page = page.clone();
             Callback::from(move |_| {
                 editor_open.set(false);
+                page.set(Page::Vault);
                 draft.set(Draft::default());
             })
         };
@@ -923,7 +928,7 @@ button:disabled { cursor: not-allowed; }
                 if !*unlocked {
                     return;
                 }
-                page.set(Page::Vault);
+                page.set(Page::AddEntry);
                 selected_id.set(None);
                 let mut next = (*draft).clone();
                 next.secret = (*generated).clone();
@@ -1026,7 +1031,6 @@ button:disabled { cursor: not-allowed; }
                                         health_score,
                                         last_sync.as_ref().cloned(),
                                         weak_count,
-                                        on_add_item.clone(),
                                         (*generated).clone(),
                                         *gen_len,
                                         *gen_upper,
@@ -1056,6 +1060,18 @@ button:disabled { cursor: not-allowed; }
                                         entries.clone(),
                                         copy_notice.clone(),
                                         on_entries_modified.clone(),
+                                    ),
+                                    Page::AddEntry => render_add_entry_page(
+                                        &draft,
+                                        *show_secret,
+                                        on_draft_service,
+                                        on_draft_username,
+                                        on_draft_secret,
+                                        on_draft_notes,
+                                        on_toggle_form_secret,
+                                        on_generate_and_fill,
+                                        on_save_draft,
+                                        on_cancel_draft,
                                     ),
                                     Page::Generator => render_generator_page(
                                         (*generated).clone(),
@@ -1099,8 +1115,7 @@ button:disabled { cursor: not-allowed; }
         detail_secret_visible: bool,
         health_score: f64,
         last_sync: Option<String>,
-        weak_count: usize,
-        on_add_item: Callback<MouseEvent>,
+        _weak_count: usize,
         generated: String,
         gen_len: usize,
         gen_upper: bool,
@@ -1382,13 +1397,6 @@ button:disabled { cursor: not-allowed; }
                     </div>
 
                     <div class="vault-bottom">
-                        <div class="highlight">
-                            <h3 style="margin-top:0;">{"Advanced Security Analysis"}</h3>
-                            <div class="muted">{format!("{} passwords should be rotated to maintain absolute precision.", weak_count)}</div>
-                            <div class="row" style="margin-top:10px;">
-                                <button class="btn" onclick={on_add_item} disabled={!unlocked}>{"Add Item"}</button>
-                            </div>
-                        </div>
                         <div class="highlight" style="border-color:#246f5a; background:#17352f;">
                             <h3 style="margin-top:0; color:#7cf0ca;">{"Rapid Generator"}</h3>
                             <div class="muted" style="color:#b8e8d8;">{"Create high-entropy randomized keys instantly."}</div>
@@ -1412,26 +1420,42 @@ button:disabled { cursor: not-allowed; }
                             </div>
                         </div>
                     </div>
-
-                    if editor_open {
-                        <div class="section" style="margin-top: 12px; max-width: 720px;">
-                            <h3 style="margin-top:0;">{if draft.id.is_some() { "Edit Entry" } else { "Add Entry" }}</h3>
-                            <input class="input" placeholder="Service" value={draft.service.clone()} oninput={on_draft_service}/>
-                            <input class="input" placeholder="Username" value={draft.username.clone()} oninput={on_draft_username}/>
-                            <div class="row">
-                                <input class="input" type={if show_secret { "text" } else { "password" }} placeholder="Password" value={draft.secret.clone()} oninput={on_draft_secret}/>
-                                <button class="btn" onclick={on_toggle_form_secret}>{"👁"}</button>
-                                <button class="btn" onclick={on_generate_and_fill}>{"Generate"}</button>
-                            </div>
-                            <textarea class="textarea" placeholder="Notes" value={draft.notes.clone()} oninput={on_draft_notes}></textarea>
-                            <div class="row" style="justify-content:flex-end; margin-top: 8px;">
-                                <button class="btn" onclick={on_cancel_draft}>{"Cancel"}</button>
-                                <button class="btn success" onclick={on_save_draft}>{"Save"}</button>
-                            </div>
-                        </div>
-                    }
                 </>
             }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_add_entry_page(
+        draft: &UseStateHandle<Draft>,
+        show_secret: bool,
+        on_draft_service: Callback<InputEvent>,
+        on_draft_username: Callback<InputEvent>,
+        on_draft_secret: Callback<InputEvent>,
+        on_draft_notes: Callback<InputEvent>,
+        on_toggle_form_secret: Callback<MouseEvent>,
+        on_generate_and_fill: Callback<MouseEvent>,
+        on_save_draft: Callback<MouseEvent>,
+        on_cancel_draft: Callback<MouseEvent>,
+    ) -> Html {
+        html! {
+            <>
+                <h2 style="margin:0; font-size:2.2rem; font-family:'Space Grotesk', 'Segoe UI', sans-serif;">{"Add Entry"}</h2>
+                <div class="section" style="margin-top:12px; max-width: 760px;">
+                    <input class="input" placeholder="Service" value={draft.service.clone()} oninput={on_draft_service}/>
+                    <input class="input" placeholder="Username" value={draft.username.clone()} oninput={on_draft_username}/>
+                    <div class="row">
+                        <input class="input" type={if show_secret { "text" } else { "password" }} placeholder="Password" value={draft.secret.clone()} oninput={on_draft_secret}/>
+                        <button class="btn" onclick={on_toggle_form_secret}>{"👁"}</button>
+                        <button class="btn" onclick={on_generate_and_fill}>{"Generate"}</button>
+                    </div>
+                    <textarea class="textarea" placeholder="Notes" value={draft.notes.clone()} oninput={on_draft_notes}></textarea>
+                    <div class="row" style="justify-content:flex-end; margin-top: 8px;">
+                        <button class="btn" onclick={on_cancel_draft}>{"Cancel"}</button>
+                        <button class="btn success" onclick={on_save_draft}>{"Save"}</button>
+                    </div>
+                </div>
+            </>
         }
     }
 
