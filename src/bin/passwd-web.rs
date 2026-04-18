@@ -1512,7 +1512,7 @@ button:disabled { cursor: not-allowed; }
                                     <button class="btn" onclick={on_copy_secret}>{"Copy"}</button>
                                 </div>
                                 <div class="row" style="margin-top:8px;">
-                                    <span class="strength"><i style={format!("width:{}%; background-color:{}", strength_width_pct(bits), strength_color(bits))}></i></span>
+                                    <span class="strength"><i style={format!("width:{}%;", strength_width_pct(bits))}></i></span>
                                     <span class="muted strength-text">{format!("{} security", strength_label(bits))}</span>
                                 </div>
                             </div>
@@ -1646,7 +1646,7 @@ button:disabled { cursor: not-allowed; }
                                         <td class="copy-cell" ondblclick={on_copy_user}>{entry.username.clone()}</td>
                                         <td>
                                             <div class="row">
-                                                <span class="strength"><i style={format!("width:{}%; background-color:{}", strength_width_pct(bits), strength_color(bits))}></i></span>
+                                                <span class="strength"><i style={format!("width:{}%;", strength_width_pct(bits))}></i></span>
                                                 <span class="muted strength-text">{strength_label(bits)}</span>
                                             </div>
                                         </td>
@@ -1677,7 +1677,7 @@ button:disabled { cursor: not-allowed; }
                             </div>
                             <div style="margin-top:12px; font-weight:700; font-family:'JetBrains Mono', monospace; overflow-wrap:anywhere;">{generated.clone()}</div>
                             <div class="row" style="margin-top:8px;">
-                                <span class="strength"><i style={format!("width:{}%; background-color:{}", strength_width_pct(generated_bits), strength_color(generated_bits))}></i></span>
+                                <span class="strength"><i style={format!("width:{}%;", strength_width_pct(generated_bits))}></i></span>
                                 <span class="muted strength-text">{format!("{generated_bits:.1} bits ({})", strength_label(generated_bits))}</span>
                             </div>
                             <div class="row" style="margin-top:10px;">
@@ -1738,7 +1738,7 @@ button:disabled { cursor: not-allowed; }
                         <label class="row"><input type="checkbox" checked={gen_symbols} onchange={on_gen_symbols}/><span>{"!@#"}</span></label>
                     </div>
                     <div class="row" style="margin-top:8px;">
-                        <span class="strength"><i style={format!("width:{}%; background-color:{}", strength_width_pct(draft_bits), strength_color(draft_bits))}></i></span>
+                        <span class="strength"><i style={format!("width:{}%;", strength_width_pct(draft_bits))}></i></span>
                         <span class="muted strength-text">{format!("Entropy: {draft_bits:.1} bits ({})", strength_label(draft_bits))}</span>
                     </div>
                     <textarea class="textarea" placeholder="Notes" value={draft.notes.clone()} oninput={on_draft_notes}></textarea>
@@ -1918,18 +1918,6 @@ button:disabled { cursor: not-allowed; }
             "Moderate"
         } else {
             "Weak"
-        }
-    }
-
-    fn strength_color(bits: f64) -> &'static str {
-        if bits >= 110.0 {
-            "#39d49e"
-        } else if bits >= 85.0 {
-            "#d8d64f"
-        } else if bits >= 60.0 {
-            "#f0a35f"
-        } else {
-            "#ef6e6e"
         }
     }
 
