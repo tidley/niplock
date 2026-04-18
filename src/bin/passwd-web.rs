@@ -39,6 +39,8 @@ body {
   color: var(--text);
   font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
 }
+button { cursor: pointer; }
+button:disabled { cursor: not-allowed; }
 .app {
   min-height: 100vh;
   display: grid;
@@ -364,6 +366,13 @@ body {
         Settings,
     }
 
+    #[derive(Clone, PartialEq)]
+    enum UnlockMethod {
+        Nsec,
+        Amber,
+        Nip07,
+    }
+
     #[derive(Clone, Default, PartialEq)]
     struct Draft {
         id: Option<String>,
@@ -389,10 +398,11 @@ body {
         let editor_open = use_state(|| false);
         let detail_secret_visible = use_state(|| false);
 
-        let nsec = use_state(String::new);
+        let signer_credential = use_state(String::new);
         let unlock_input = use_state(String::new);
         let unlock_error = use_state(|| None::<String>);
         let unlock_panel_open = use_state(|| false);
+        let unlock_method = use_state(|| UnlockMethod::Nsec);
         let unlocked = use_state(|| false);
 
         let sync_state = use_state(|| SyncState::Idle);
@@ -409,7 +419,7 @@ body {
 
         {
             let entries = entries.clone();
-            let nsec = nsec.clone();
+            let signer_credential = signer_credential.clone();
             let sync_state = sync_state.clone();
             let last_sync = last_sync.clone();
             let sync_in_flight = sync_in_flight.clone();
@@ -417,7 +427,7 @@ body {
             use_effect_with((), move |_| {
                 let doc_listener = window().and_then(|w| w.document()).map(|doc| {
                     let entries = entries.clone();
-                    let nsec = nsec.clone();
+                    let signer_credential = signer_credential.clone();
                     let sync_state = sync_state.clone();
                     let last_sync = last_sync.clone();
                     let sync_in_flight = sync_in_flight.clone();
@@ -427,7 +437,8 @@ body {
                             if let Some(document) = window().and_then(|w| w.document()) {
                                 if document.hidden() {
                                     spawn_sync(
-                                        nsec.clone(),
+                                        (*signer_credential).clone(),
+                                        (*entries).clone(),
                                         entries.clone(),
                                         sync_state.clone(),
                                         last_sync.clone(),
@@ -441,7 +452,7 @@ body {
 
                 let pagehide_listener = window().map(|win| {
                     let entries = entries.clone();
-                    let nsec = nsec.clone();
+                    let signer_credential = signer_credential.clone();
                     let sync_state = sync_state.clone();
                     let last_sync = last_sync.clone();
                     let sync_in_flight = sync_in_flight.clone();
@@ -449,7 +460,8 @@ body {
                     EventListener::new(&win, "pagehide", move |_| {
                         if *unlocked {
                             spawn_sync(
-                                nsec.clone(),
+                                (*signer_credential).clone(),
+                                (*entries).clone(),
                                 entries.clone(),
                                 sync_state.clone(),
                                 last_sync.clone(),
@@ -543,6 +555,19 @@ body {
             })
         };
 
+        let on_unlock_method_nsec = {
+            let unlock_method = unlock_method.clone();
+            Callback::from(move |_| unlock_method.set(UnlockMethod::Nsec))
+        };
+        let on_unlock_method_amber = {
+            let unlock_method = unlock_method.clone();
+            Callback::from(move |_| unlock_method.set(UnlockMethod::Amber))
+        };
+        let on_unlock_method_nip07 = {
+            let unlock_method = unlock_method.clone();
+            Callback::from(move |_| unlock_method.set(UnlockMethod::Nip07))
+        };
+
         let on_unlock_input = {
             let unlock_input = unlock_input.clone();
             Callback::from(move |e: InputEvent| {
@@ -553,7 +578,8 @@ body {
 
         let on_unlock_submit = {
             let unlock_input = unlock_input.clone();
-            let nsec = nsec.clone();
+            let unlock_method = unlock_method.clone();
+            let signer_credential = signer_credential.clone();
             let unlocked = unlocked.clone();
             let unlock_error = unlock_error.clone();
             let unlock_panel_open = unlock_panel_open.clone();
@@ -561,28 +587,36 @@ body {
             let sync_state = sync_state.clone();
             let last_sync = last_sync.clone();
             let sync_in_flight = sync_in_flight.clone();
-            Callback::from(move |_| match signer_from_input(unlock_input.trim()) {
-                Ok(_) => {
-                    nsec.set(unlock_input.trim().to_string());
-                    unlocked.set(true);
-                    unlock_error.set(None);
-                    unlock_panel_open.set(false);
-                    spawn_sync(
-                        nsec.clone(),
-                        entries.clone(),
-                        sync_state.clone(),
-                        last_sync.clone(),
-                        sync_in_flight.clone(),
-                    );
-                }
-                Err(err) => {
-                    unlock_error.set(Some(format!("Invalid signer credential: {err}")));
+            Callback::from(move |_| {
+                let credential = match &*unlock_method {
+                    UnlockMethod::Nip07 => "nip07".to_string(),
+                    UnlockMethod::Nsec | UnlockMethod::Amber => unlock_input.trim().to_string(),
+                };
+
+                match signer_from_input(&credential) {
+                    Ok(_) => {
+                        signer_credential.set(credential.clone());
+                        unlocked.set(true);
+                        unlock_error.set(None);
+                        unlock_panel_open.set(false);
+                        spawn_sync(
+                            credential,
+                            (*entries).clone(),
+                            entries.clone(),
+                            sync_state.clone(),
+                            last_sync.clone(),
+                            sync_in_flight.clone(),
+                        );
+                    }
+                    Err(err) => {
+                        unlock_error.set(Some(format!("Invalid signer credential: {err}")));
+                    }
                 }
             })
         };
 
         let on_sync_now = {
-            let nsec = nsec.clone();
+            let signer_credential = signer_credential.clone();
             let entries = entries.clone();
             let sync_state = sync_state.clone();
             let last_sync = last_sync.clone();
@@ -591,7 +625,8 @@ body {
             Callback::from(move |_| {
                 if *unlocked {
                     spawn_sync(
-                        nsec.clone(),
+                        (*signer_credential).clone(),
+                        (*entries).clone(),
                         entries.clone(),
                         sync_state.clone(),
                         last_sync.clone(),
@@ -602,16 +637,17 @@ body {
         };
 
         let on_entries_modified = {
-            let nsec = nsec.clone();
+            let signer_credential = signer_credential.clone();
             let entries = entries.clone();
             let sync_state = sync_state.clone();
             let last_sync = last_sync.clone();
             let sync_in_flight = sync_in_flight.clone();
             let unlocked = unlocked.clone();
-            Callback::from(move |_| {
+            Callback::from(move |current_entries: Vec<PasswordEntry>| {
                 if *unlocked {
                     spawn_sync(
-                        nsec.clone(),
+                        (*signer_credential).clone(),
+                        current_entries,
                         entries.clone(),
                         sync_state.clone(),
                         last_sync.clone(),
@@ -703,11 +739,11 @@ body {
 
                 let next = from_map(map);
                 save_entries(&next);
-                entries.set(next);
+                entries.set(next.clone());
                 selected_id.set(Some(id));
                 editor_open.set(false);
                 draft.set(Draft::default());
-                on_entries_modified.emit(());
+                on_entries_modified.emit(next);
             })
         };
 
@@ -793,6 +829,24 @@ body {
             })
         };
 
+        let on_use_generated = {
+            let page = page.clone();
+            let selected_id = selected_id.clone();
+            let draft = draft.clone();
+            let show_secret = show_secret.clone();
+            let editor_open = editor_open.clone();
+            let generated = generated.clone();
+            Callback::from(move |_| {
+                page.set(Page::Vault);
+                selected_id.set(None);
+                let mut next = (*draft).clone();
+                next.secret = (*generated).clone();
+                draft.set(next);
+                show_secret.set(false);
+                editor_open.set(true);
+            })
+        };
+
         let corner_class = match &*sync_state {
             SyncState::Idle => "corner idle",
             SyncState::Syncing => "corner syncing",
@@ -841,14 +895,28 @@ body {
                         <header class="top">
                             <input class="search" placeholder="Search vault..." value={(*search).clone()} oninput={on_search} />
                             <div class="top-right">
-                                <span class="icon">{"⟳"}</span>
-                                <span class="icon">{"🔒"}</span>
+                                <button class="btn" onclick={on_sync_now.clone()} disabled={!*unlocked}>{"Refresh"}</button>
                                 <button class="unlock" onclick={on_toggle_unlock_panel}>{ if *unlocked { "Lock" } else { "Unlock" } }</button>
                             </div>
                             if *unlock_panel_open {
                                 <div class="unlock-panel">
                                     <div style="font-weight:700; margin-bottom:8px;">{"Unlock Vault Sync"}</div>
-                                    <input class="input" type="password" placeholder="nsec1... or bunker://..." value={(*unlock_input).clone()} oninput={on_unlock_input} />
+                                    <div class="row" style="margin-bottom:8px;">
+                                        <button class={classes!("btn", if *unlock_method == UnlockMethod::Nsec { Some("primary") } else { None })} onclick={on_unlock_method_nsec}>{"NSEC"}</button>
+                                        <button class={classes!("btn", if *unlock_method == UnlockMethod::Amber { Some("primary") } else { None })} onclick={on_unlock_method_amber}>{"Amber / Bunker"}</button>
+                                        <button class={classes!("btn", if *unlock_method == UnlockMethod::Nip07 { Some("primary") } else { None })} onclick={on_unlock_method_nip07}>{"nos2xfox"}</button>
+                                    </div>
+                                    if *unlock_method == UnlockMethod::Nip07 {
+                                        <div class="muted" style="margin-top: 8px; font-size: 0.85rem;">{"Using browser signer via NIP-07 (nos2xfox)."}</div>
+                                    } else {
+                                        <input
+                                            class="input"
+                                            type={if *unlock_method == UnlockMethod::Nsec { "password" } else { "text" }}
+                                            placeholder={if *unlock_method == UnlockMethod::Nsec { "nsec1..." } else { "bunker://... or nostrconnect://..." }}
+                                            value={(*unlock_input).clone()}
+                                            oninput={on_unlock_input.clone()}
+                                        />
+                                    }
                                     if let Some(err) = &*unlock_error {
                                         <div style="color: var(--err); margin-top: 8px; font-size: 0.85rem;">{err.clone()}</div>
                                     }
@@ -876,9 +944,10 @@ body {
                                         health_score,
                                         last_sync.as_ref().cloned(),
                                         weak_count,
-                                        entries.len(),
                                         on_add_item.clone(),
-                                        on_sync_now.clone(),
+                                        (*generated).clone(),
+                                        on_generate.clone(),
+                                        on_use_generated.clone(),
                                         on_draft_service,
                                         on_draft_username,
                                         on_draft_secret,
@@ -912,7 +981,7 @@ body {
                                     ),
                                     Page::SecurityAudit => render_audit_page(&entries, weak_count, health_score),
                                     Page::Settings => render_settings_page(
-                                        (*nsec).clone(),
+                                        (*signer_credential).clone(),
                                         *unlocked,
                                         sync_label,
                                         last_sync.as_ref().cloned(),
@@ -937,9 +1006,10 @@ body {
         health_score: f64,
         last_sync: Option<String>,
         weak_count: usize,
-        total_count: usize,
         on_add_item: Callback<MouseEvent>,
-        on_sync_now: Callback<MouseEvent>,
+        generated: String,
+        on_generate: Callback<MouseEvent>,
+        on_use_generated: Callback<MouseEvent>,
         on_draft_service: Callback<InputEvent>,
         on_draft_username: Callback<InputEvent>,
         on_draft_secret: Callback<InputEvent>,
@@ -954,7 +1024,7 @@ body {
         show_secret_state: UseStateHandle<bool>,
         entries_state: UseStateHandle<Vec<PasswordEntry>>,
         copy_notice: UseStateHandle<Option<String>>,
-        on_entries_modified: Callback<()>,
+        on_entries_modified: Callback<Vec<PasswordEntry>>,
     ) -> Html {
         if let Some(entry) = selected_entry {
             let on_back = {
@@ -990,9 +1060,9 @@ body {
                     map.remove(&delete_id);
                     let next = from_map(map);
                     save_entries(&next);
-                    entries_state.set(next);
+                    entries_state.set(next.clone());
                     selected_id.set(None);
-                    on_entries_modified.emit(());
+                    on_entries_modified.emit(next);
                 })
             };
 
@@ -1071,6 +1141,20 @@ body {
                                     <div class="row">
                                         <input class="input" type={if show_secret { "text" } else { "password" }} placeholder="Password" value={draft.secret.clone()} oninput={on_draft_secret}/>
                                         <button class="btn" onclick={on_toggle_form_secret.clone()}>{"👁"}</button>
+                                        <button
+                                            class="btn"
+                                            onclick={{
+                                                let draft_state = draft_state.clone();
+                                                let generated = generated.clone();
+                                                Callback::from(move |_| {
+                                                    let mut next = (*draft_state).clone();
+                                                    next.secret = generated.clone();
+                                                    draft_state.set(next);
+                                                })
+                                            }}
+                                        >
+                                            {"Generate"}
+                                        </button>
                                     </div>
                                     <textarea class="textarea" placeholder="Security notes" value={draft.notes.clone()} oninput={on_draft_notes}></textarea>
                                     <div class="row" style="justify-content:flex-end; margin-top: 8px;">
@@ -1107,7 +1191,6 @@ body {
                     <div class="explorer-head">
                         <div>
                             <h2 style="margin:0; font-size:2.2rem; font-family:'Space Grotesk', 'Segoe UI', sans-serif;">{"Vault Explorer"}</h2>
-                            <div class="muted" style="margin-top:6px;">{format!("Access your secure credentials across all platforms. Precision active for {} items.", total_count)}</div>
                         </div>
                         <div class="stats">
                             <div class="stat">
@@ -1119,13 +1202,6 @@ body {
                                 <div class="v" style="font-size:1.3rem;">{last_sync.unwrap_or_else(|| "Never".to_string())}</div>
                             </div>
                         </div>
-                    </div>
-
-                    <div class="tabs">
-                        <button class="tab active">{"All Items"}</button>
-                        <button class="tab">{"Passwords"}</button>
-                        <button class="tab">{"Secure Notes"}</button>
-                        <button class="tab">{"Credit Cards"}</button>
                     </div>
 
                     <div class="section">
@@ -1198,14 +1274,17 @@ body {
                             <h3 style="margin-top:0;">{"Advanced Security Analysis"}</h3>
                             <div class="muted">{format!("{} passwords should be rotated to maintain absolute precision.", weak_count)}</div>
                             <div class="row" style="margin-top:10px;">
-                                <button class="btn" onclick={on_sync_now}>{"Run Full Audit"}</button>
                                 <button class="btn" onclick={on_add_item}>{"Add Item"}</button>
                             </div>
                         </div>
                         <div class="highlight" style="border-color:#246f5a; background:#17352f;">
                             <h3 style="margin-top:0; color:#7cf0ca;">{"Rapid Generator"}</h3>
                             <div class="muted" style="color:#b8e8d8;">{"Create high-entropy randomized keys instantly."}</div>
-                            <div style="margin-top:12px; font-weight:700;">{"••••••••••••••••"}</div>
+                            <div style="margin-top:12px; font-weight:700; font-family:'JetBrains Mono', monospace; overflow-wrap:anywhere;">{generated.clone()}</div>
+                            <div class="row" style="margin-top:10px;">
+                                <button class="btn" onclick={on_generate.clone()}>{"Regenerate"}</button>
+                                <button class="btn success" onclick={on_use_generated}>{"Use in Add Entry"}</button>
+                            </div>
                         </div>
                     </div>
 
@@ -1217,6 +1296,20 @@ body {
                             <div class="row">
                                 <input class="input" type={if show_secret { "text" } else { "password" }} placeholder="Password" value={draft.secret.clone()} oninput={on_draft_secret}/>
                                 <button class="btn" onclick={on_toggle_form_secret}>{"👁"}</button>
+                                <button
+                                    class="btn"
+                                    onclick={{
+                                        let draft_state = draft_state.clone();
+                                        let generated = generated.clone();
+                                        Callback::from(move |_| {
+                                            let mut next = (*draft_state).clone();
+                                            next.secret = generated.clone();
+                                            draft_state.set(next);
+                                        })
+                                    }}
+                                >
+                                    {"Generate"}
+                                </button>
                             </div>
                             <textarea class="textarea" placeholder="Notes" value={draft.notes.clone()} oninput={on_draft_notes}></textarea>
                             <div class="row" style="justify-content:flex-end; margin-top: 8px;">
@@ -1454,8 +1547,9 @@ body {
     }
 
     fn spawn_sync(
-        signer_credential: UseStateHandle<String>,
-        entries: UseStateHandle<Vec<PasswordEntry>>,
+        signer_credential: String,
+        local_entries: Vec<PasswordEntry>,
+        entries_state: UseStateHandle<Vec<PasswordEntry>>,
         sync_state: UseStateHandle<SyncState>,
         last_sync: UseStateHandle<Option<String>>,
         sync_in_flight: UseStateHandle<bool>,
@@ -1476,7 +1570,7 @@ body {
                 return;
             }
 
-            let signer = match signer_from_input(signer_credential.trim()) {
+            let signer = match signer_from_input(&signer_credential) {
                 Ok(v) => v,
                 Err(err) => {
                     sync_state.set(SyncState::Error(format!("invalid signer: {err}")));
@@ -1499,12 +1593,12 @@ body {
                 }
             };
 
-            let local = to_map(&entries);
+            let local = to_map(&local_entries);
             match sync.sync(&local).await {
                 Ok((merged, _summary)) => {
                     let next = from_map(merged);
                     save_entries(&next);
-                    entries.set(next);
+                    entries_state.set(next);
                     last_sync.set(Some(Utc::now().to_rfc3339()));
                     sync_state.set(SyncState::Idle);
                 }

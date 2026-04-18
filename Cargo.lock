@@ -1266,6 +1266,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "nostr-browser-signer"
+version = "0.44.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4e0430dc4517ea03ec055c256f06326671a214e0dfd561d46bafb224d3d31314"
+dependencies = [
+ "js-sys",
+ "nostr",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
+]
+
+[[package]]
 name = "nostr-connect"
 version = "0.44.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1386,6 +1399,7 @@ dependencies = [
  "dirs",
  "gloo-events 0.2.0",
  "js-sys",
+ "nostr-browser-signer",
  "nostr-connect",
  "nostr-sdk",
  "serde",

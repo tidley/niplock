@@ -7,6 +7,9 @@ use nostr_connect::prelude::{NostrConnect, NostrConnectURI};
 use nostr_sdk::prelude::*;
 use tracing::{debug, warn};
 
+#[cfg(target_arch = "wasm32")]
+use nostr_browser_signer::BrowserSigner;
+
 use crate::model::{PasswordEntry, PasswordEnvelope};
 
 #[derive(Debug)]
@@ -151,6 +154,22 @@ pub fn signer_from_input(input: &str) -> Result<Arc<dyn NostrSigner>> {
 
     if credential.is_empty() {
         anyhow::bail!("empty signer credential");
+    }
+
+    if credential.eq_ignore_ascii_case("nip07")
+        || credential.eq_ignore_ascii_case("nos2xfox")
+        || credential.eq_ignore_ascii_case("extension")
+    {
+        #[cfg(target_arch = "wasm32")]
+        {
+            let signer = BrowserSigner::new()?;
+            return Ok(signer.into_nostr_signer());
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            anyhow::bail!("nip07 browser signer is only available in wasm/web builds");
+        }
     }
 
     if credential.starts_with("bunker://") || credential.starts_with("nostrconnect://") {
