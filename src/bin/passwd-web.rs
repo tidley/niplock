@@ -186,6 +186,7 @@ button:disabled { cursor: not-allowed; }
 }
 .muted { color: var(--muted); }
 .row { display: flex; gap: 8px; align-items: center; }
+.row > * { min-width: 0; }
 .btn {
   border: 1px solid #2d384b;
   background: #1c222d;
@@ -274,6 +275,7 @@ button:disabled { cursor: not-allowed; }
 .strength > i {
   display: block;
   height: 100%;
+  background-color: var(--teal);
 }
 .vault-bottom {
   margin-top: 12px;
@@ -291,6 +293,9 @@ button:disabled { cursor: not-allowed; }
   display: grid;
   grid-template-columns: minmax(0, 1fr) 270px;
   gap: 14px;
+}
+.detail-grid > * {
+  min-width: 0;
 }
 .detail-main {
   display: flex;
@@ -339,6 +344,7 @@ button:disabled { cursor: not-allowed; }
   border-radius: 8px;
   padding: 10px;
   margin-bottom: 10px;
+  min-width: 0;
 }
 .detail-label {
   font-size: 0.68rem;
@@ -359,6 +365,8 @@ button:disabled { cursor: not-allowed; }
   border-radius: 8px;
   padding: 10px;
   margin-bottom: 10px;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 .generator-grid {
   display: grid;
@@ -419,11 +427,22 @@ button:disabled { cursor: not-allowed; }
   .vault-bottom, .detail-grid, .generator-grid { grid-template-columns: 1fr; }
   .audit-grid, .settings-grid { grid-template-columns: 1fr; }
   .strength-text { display: none; }
+  .top { padding: 0 10px; gap: 8px; }
+  .top-right { gap: 6px; }
+  .unlock { padding: 8px 9px; }
 }
 @media (max-width: 700px) {
   .table th:nth-child(4), .table td:nth-child(4) { display: none; }
   .table th, .table td { padding: 8px 6px; font-size: 0.9rem; }
   .table th { font-size: 0.62rem; }
+  .top { padding: 0 8px; }
+  .search { padding: 8px 10px; font-size: 0.85rem; }
+  .btn { padding: 7px 8px; font-size: 0.78rem; }
+  .unlock { font-size: 0.68rem; padding: 7px 8px; }
+  .page { padding: 12px; }
+  .detail-sub { font-size: 0.75rem; gap: 8px; }
+  .row { flex-wrap: wrap; }
+  .password-row { grid-template-columns: 1fr auto; }
 }
 "#;
 
@@ -1493,7 +1512,7 @@ button:disabled { cursor: not-allowed; }
                                     <button class="btn" onclick={on_copy_secret}>{"Copy"}</button>
                                 </div>
                                 <div class="row" style="margin-top:8px;">
-                                    <span class="strength"><i style={format!("width:{}%; background:{}", (bits / 1.2).min(100.0), strength_color(bits))}></i></span>
+                                    <span class="strength"><i style={format!("width:{}%; background-color:{}", strength_width_pct(bits), strength_color(bits))}></i></span>
                                     <span class="muted strength-text">{format!("{} security", strength_label(bits))}</span>
                                 </div>
                             </div>
@@ -1535,9 +1554,9 @@ button:disabled { cursor: not-allowed; }
                             <div class="sidebar-card">
                                 <div class="detail-label">{"Metadata"}</div>
                                 <div class="muted">{format!("Last modified: {}", entry.updated_at.format("%b %d, %Y %H:%M UTC"))}</div>
-                                <div class="muted" style="margin-top:6px;">{format!("Record id: {}", entry.id)}</div>
+                                <div class="muted" style="margin-top:6px; font-family:monospace; overflow-wrap:anywhere; word-break:break-word;">{format!("Record id: {}", entry.id)}</div>
                                 if let Some(event_id) = &entry.last_event_id {
-                                    <div class="muted" style="margin-top:6px;">{format!("Last sync event: {}", event_id)}</div>
+                                    <div class="muted" style="margin-top:6px; font-family:monospace; overflow-wrap:anywhere; word-break:break-word;">{format!("Last sync event: {}", event_id)}</div>
                                 }
                             </div>
                             <div class="sidebar-card danger-zone">
@@ -1621,15 +1640,13 @@ button:disabled { cursor: not-allowed; }
                                 };
 
                                 let bits = entropy_bits(&entry.secret);
-                                let pct = (bits / 1.2).min(100.0);
-
                                 html! {
                                     <tr onclick={on_select}>
                                         <td><strong>{entry.service.clone()}</strong></td>
                                         <td class="copy-cell" ondblclick={on_copy_user}>{entry.username.clone()}</td>
                                         <td>
                                             <div class="row">
-                                                <span class="strength"><i style={format!("width:{pct}%; background:{}", strength_color(bits))}></i></span>
+                                                <span class="strength"><i style={format!("width:{}%; background-color:{}", strength_width_pct(bits), strength_color(bits))}></i></span>
                                                 <span class="muted strength-text">{strength_label(bits)}</span>
                                             </div>
                                         </td>
@@ -1660,7 +1677,7 @@ button:disabled { cursor: not-allowed; }
                             </div>
                             <div style="margin-top:12px; font-weight:700; font-family:'JetBrains Mono', monospace; overflow-wrap:anywhere;">{generated.clone()}</div>
                             <div class="row" style="margin-top:8px;">
-                                <span class="strength"><i style={format!("width:{}%; background:{}", (generated_bits / 1.2).min(100.0), strength_color(generated_bits))}></i></span>
+                                <span class="strength"><i style={format!("width:{}%; background-color:{}", strength_width_pct(generated_bits), strength_color(generated_bits))}></i></span>
                                 <span class="muted strength-text">{format!("{generated_bits:.1} bits ({})", strength_label(generated_bits))}</span>
                             </div>
                             <div class="row" style="margin-top:10px;">
@@ -1721,7 +1738,7 @@ button:disabled { cursor: not-allowed; }
                         <label class="row"><input type="checkbox" checked={gen_symbols} onchange={on_gen_symbols}/><span>{"!@#"}</span></label>
                     </div>
                     <div class="row" style="margin-top:8px;">
-                        <span class="strength"><i style={format!("width:{}%; background:{}", (draft_bits / 1.2).min(100.0), strength_color(draft_bits))}></i></span>
+                        <span class="strength"><i style={format!("width:{}%; background-color:{}", strength_width_pct(draft_bits), strength_color(draft_bits))}></i></span>
                         <span class="muted strength-text">{format!("Entropy: {draft_bits:.1} bits ({})", strength_label(draft_bits))}</span>
                     </div>
                     <textarea class="textarea" placeholder="Notes" value={draft.notes.clone()} oninput={on_draft_notes}></textarea>
@@ -1914,6 +1931,11 @@ button:disabled { cursor: not-allowed; }
         } else {
             "#ef6e6e"
         }
+    }
+
+    fn strength_width_pct(bits: f64) -> f64 {
+        let pct = (bits / 1.2).clamp(0.0, 100.0);
+        if pct == 0.0 { 0.0 } else { pct.max(4.0) }
     }
 
     fn entropy_bits(secret: &str) -> f64 {
