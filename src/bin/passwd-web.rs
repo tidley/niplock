@@ -817,14 +817,67 @@ button:disabled { cursor: not-allowed; }
             let unlocked = unlocked.clone();
             let unlock_error = unlock_error.clone();
             let active_npub = active_npub.clone();
+            let signer_credential = signer_credential.clone();
             let entries = entries.clone();
             let selected_id = selected_id.clone();
             let editor_open = editor_open.clone();
+            let sync_state = sync_state.clone();
             let live_sync = live_sync.clone();
             let live_subscription_id = live_subscription_id.clone();
             let live_listener_running = live_listener_running.clone();
             Callback::from(move |_| {
                 if *unlocked {
+                    sync_state.set(SyncState::Syncing);
+                    let live_sync = live_sync.clone();
+                    let sync_state = sync_state.clone();
+                    let signer_credential = (*signer_credential).clone();
+                    let current_entries = (*entries).clone();
+                    spawn_local(async move {
+                        let mut sync = live_sync.borrow_mut().take();
+                        if sync.is_none() {
+                            let signer = match signer_from_input(&signer_credential) {
+                                Ok(v) => v,
+                                Err(_) => {
+                                    sync_state.set(SyncState::Error(
+                                        "lock sync: invalid signer".to_string(),
+                                    ));
+                                    return;
+                                }
+                            };
+                            sync = match NostrSync::new_with_signer(
+                                signer,
+                                DEFAULT_RELAYS.iter().map(|r| r.to_string()).collect(),
+                            )
+                            .await
+                            {
+                                Ok(v) => Some(v),
+                                Err(_) => {
+                                    sync_state.set(SyncState::Error(
+                                        "lock sync: relay connect failed".to_string(),
+                                    ));
+                                    return;
+                                }
+                            };
+                        }
+
+                        if let Some(sync) = sync {
+                            let local = to_map(&current_entries);
+                            match sync.sync(&local).await {
+                                Ok((merged, _summary)) => {
+                                    save_entries(&from_map(merged));
+                                    sync_state.set(SyncState::Idle);
+                                }
+                                Err(_) => {
+                                    sync_state
+                                        .set(SyncState::Error("lock sync failed".to_string()));
+                                }
+                            }
+                            sync.shutdown().await;
+                        } else {
+                            sync_state.set(SyncState::Idle);
+                        }
+                    });
+
                     unlocked.set(false);
                     unlock_panel_open.set(false);
                     unlock_error.set(None);
@@ -834,15 +887,6 @@ button:disabled { cursor: not-allowed; }
                     editor_open.set(false);
                     *live_listener_running.borrow_mut() = false;
                     *live_subscription_id.borrow_mut() = None;
-                    {
-                        let live_sync = live_sync.clone();
-                        spawn_local(async move {
-                            let current = live_sync.borrow_mut().take();
-                            if let Some(sync) = current {
-                                sync.shutdown().await;
-                            }
-                        });
-                    }
                 } else {
                     unlock_panel_open.set(!*unlock_panel_open);
                 }
@@ -1054,7 +1098,11 @@ button:disabled { cursor: not-allowed; }
                 let next = from_map(map);
                 save_entries(&next);
                 entries.set(next.clone());
-                selected_id.set(Some(id));
+                if *page == Page::AddEntry {
+                    selected_id.set(None);
+                } else {
+                    selected_id.set(Some(id));
+                }
                 editor_open.set(false);
                 page.set(Page::Vault);
                 draft.set(Draft::default());
@@ -1739,7 +1787,7 @@ button:disabled { cursor: not-allowed; }
                     </div>
                     <div class="row" style="margin-top:8px;">
                         <span class="strength"><i style={format!("width:{}%;", strength_width_pct(draft_bits))}></i></span>
-                        <span class="muted strength-text">{format!("Entropy: {draft_bits:.1} bits ({})", strength_label(draft_bits))}</span>
+                        <span class="muted">{format!("Entropy: {draft_bits:.1} bits ({})", strength_label(draft_bits))}</span>
                     </div>
                     <textarea class="textarea" placeholder="Notes" value={draft.notes.clone()} oninput={on_draft_notes}></textarea>
                     <div class="row" style="justify-content:flex-end; margin-top: 8px;">
