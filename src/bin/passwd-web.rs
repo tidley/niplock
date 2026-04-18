@@ -285,8 +285,49 @@ button:disabled { cursor: not-allowed; }
 }
 .detail-grid {
   display: grid;
-  grid-template-columns: 1fr 320px;
+  grid-template-columns: minmax(0, 1fr) 270px;
+  gap: 14px;
+}
+.detail-main {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.detail-head {
+  border: 1px solid var(--line);
+  background: linear-gradient(140deg, #161b25, #141922);
+  border-radius: 10px;
+  padding: 14px;
+}
+.detail-title {
+  font-size: 2rem;
+  font-weight: 700;
+  margin-bottom: 4px;
+}
+.detail-sub {
+  display: flex;
+  flex-wrap: wrap;
   gap: 12px;
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+.field-value {
+  font-size: 1rem;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.field-value.mono {
+  font-family: "JetBrains Mono", monospace;
+  letter-spacing: 0.02em;
+}
+.action-rail {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.danger-zone {
+  border-color: #4f2d34;
+  background: #24161a;
 }
 .detail-field {
   border: 1px solid var(--line);
@@ -388,7 +429,7 @@ button:disabled { cursor: not-allowed; }
 
     #[function_component(WebApp)]
     fn web_app() -> Html {
-        let entries = use_state(load_entries);
+        let entries = use_state(Vec::<PasswordEntry>::new);
         let page = use_state(|| Page::Vault);
         let selected_id = use_state(|| None::<String>);
         let search = use_state(String::new);
@@ -478,7 +519,7 @@ button:disabled { cursor: not-allowed; }
             });
         }
 
-        let filtered_entries: Vec<PasswordEntry> = {
+        let filtered_entries: Vec<PasswordEntry> = if *unlocked {
             let q = search.trim().to_ascii_lowercase();
             entries
                 .iter()
@@ -494,11 +535,17 @@ button:disabled { cursor: not-allowed; }
                 })
                 .cloned()
                 .collect()
+        } else {
+            vec![]
         };
 
-        let selected_entry = selected_id
-            .as_ref()
-            .and_then(|id| entries.iter().find(|entry| &entry.id == id).cloned());
+        let selected_entry = if *unlocked {
+            selected_id
+                .as_ref()
+                .and_then(|id| entries.iter().find(|entry| &entry.id == id).cloned())
+        } else {
+            None
+        };
 
         let on_nav_vault = {
             let page = page.clone();
@@ -523,7 +570,11 @@ button:disabled { cursor: not-allowed; }
             let draft = draft.clone();
             let selected_id = selected_id.clone();
             let show_secret = show_secret.clone();
+            let unlocked = unlocked.clone();
             Callback::from(move |_| {
+                if !*unlocked {
+                    return;
+                }
                 page.set(Page::Vault);
                 selected_id.set(None);
                 draft.set(Draft::default());
@@ -544,11 +595,17 @@ button:disabled { cursor: not-allowed; }
             let unlock_panel_open = unlock_panel_open.clone();
             let unlocked = unlocked.clone();
             let unlock_error = unlock_error.clone();
+            let entries = entries.clone();
+            let selected_id = selected_id.clone();
+            let editor_open = editor_open.clone();
             Callback::from(move |_| {
                 if *unlocked {
                     unlocked.set(false);
                     unlock_panel_open.set(false);
                     unlock_error.set(None);
+                    entries.set(vec![]);
+                    selected_id.set(None);
+                    editor_open.set(false);
                 } else {
                     unlock_panel_open.set(!*unlock_panel_open);
                 }
@@ -817,6 +874,24 @@ button:disabled { cursor: not-allowed; }
             })
         };
 
+        let on_generate_and_fill = {
+            let draft = draft.clone();
+            let generated = generated.clone();
+            let gen_len = gen_len.clone();
+            let gen_upper = gen_upper.clone();
+            let gen_lower = gen_lower.clone();
+            let gen_numbers = gen_numbers.clone();
+            let gen_symbols = gen_symbols.clone();
+            Callback::from(move |_| {
+                let next_secret =
+                    generate_password(*gen_len, *gen_upper, *gen_lower, *gen_numbers, *gen_symbols);
+                generated.set(next_secret.clone());
+                let mut next = (*draft).clone();
+                next.secret = next_secret;
+                draft.set(next);
+            })
+        };
+
         let on_copy_generated = {
             let generated = generated.clone();
             let copy_notice = copy_notice.clone();
@@ -836,7 +911,11 @@ button:disabled { cursor: not-allowed; }
             let show_secret = show_secret.clone();
             let editor_open = editor_open.clone();
             let generated = generated.clone();
+            let unlocked = unlocked.clone();
             Callback::from(move |_| {
+                if !*unlocked {
+                    return;
+                }
                 page.set(Page::Vault);
                 selected_id.set(None);
                 let mut next = (*draft).clone();
@@ -938,6 +1017,7 @@ button:disabled { cursor: not-allowed; }
                                         &filtered_entries,
                                         &selected_entry,
                                         *editor_open,
+                                        *unlocked,
                                         &draft,
                                         *show_secret,
                                         *detail_secret_visible,
@@ -946,8 +1026,19 @@ button:disabled { cursor: not-allowed; }
                                         weak_count,
                                         on_add_item.clone(),
                                         (*generated).clone(),
+                                        *gen_len,
+                                        *gen_upper,
+                                        *gen_lower,
+                                        *gen_numbers,
+                                        *gen_symbols,
+                                        on_gen_len.clone(),
+                                        on_gen_upper.clone(),
+                                        on_gen_lower.clone(),
+                                        on_gen_numbers.clone(),
+                                        on_gen_symbols.clone(),
                                         on_generate.clone(),
                                         on_use_generated.clone(),
+                                        on_generate_and_fill.clone(),
                                         on_draft_service,
                                         on_draft_username,
                                         on_draft_secret,
@@ -1000,6 +1091,7 @@ button:disabled { cursor: not-allowed; }
         filtered_entries: &[PasswordEntry],
         selected_entry: &Option<PasswordEntry>,
         editor_open: bool,
+        unlocked: bool,
         draft: &UseStateHandle<Draft>,
         show_secret: bool,
         detail_secret_visible: bool,
@@ -1008,8 +1100,19 @@ button:disabled { cursor: not-allowed; }
         weak_count: usize,
         on_add_item: Callback<MouseEvent>,
         generated: String,
+        gen_len: usize,
+        gen_upper: bool,
+        gen_lower: bool,
+        gen_numbers: bool,
+        gen_symbols: bool,
+        on_gen_len: Callback<InputEvent>,
+        on_gen_upper: Callback<Event>,
+        on_gen_lower: Callback<Event>,
+        on_gen_numbers: Callback<Event>,
+        on_gen_symbols: Callback<Event>,
         on_generate: Callback<MouseEvent>,
         on_use_generated: Callback<MouseEvent>,
+        on_generate_and_fill: Callback<MouseEvent>,
         on_draft_service: Callback<InputEvent>,
         on_draft_username: Callback<InputEvent>,
         on_draft_secret: Callback<InputEvent>,
@@ -1091,6 +1194,7 @@ button:disabled { cursor: not-allowed; }
                     );
                 })
             };
+            let bits = entropy_bits(&entry.secret);
 
             html! {
                 <>
@@ -1099,16 +1203,21 @@ button:disabled { cursor: not-allowed; }
                         <span>{format!("Vault / {}", entry.service)}</span>
                     </div>
                     <div class="detail-grid">
-                        <div>
-                            <div class="section" style="margin-bottom:10px;">
-                                <div style="font-size: 2rem; font-weight: 700; margin-bottom: 3px;">{entry.service.clone()}</div>
-                                <div class="muted">{"Personal Development Account"}</div>
+                        <div class="detail-main">
+                            <div class="detail-head">
+                                <div class="detail-label">{"Credential"}</div>
+                                <div class="detail-title">{entry.service.clone()}</div>
+                                <div class="detail-sub">
+                                    <span>{format!("Last modified {}", entry.updated_at.format("%b %d, %Y"))}</span>
+                                    <span>{format!("{bits:.1} bits entropy")}</span>
+                                    <span>{strength_label(bits)}</span>
+                                </div>
                             </div>
 
                             <div class="detail-field">
                                 <div class="detail-label">{"Username / Email"}</div>
                                 <div class="row" style="justify-content: space-between;">
-                                    <strong ondblclick={on_copy_user.clone()} class="copy-cell">{entry.username.clone()}</strong>
+                                    <div ondblclick={on_copy_user.clone()} class="copy-cell field-value">{entry.username.clone()}</div>
                                     <button class="btn" onclick={on_copy_user}>{"Copy"}</button>
                                 </div>
                             </div>
@@ -1116,45 +1225,37 @@ button:disabled { cursor: not-allowed; }
                             <div class="detail-field">
                                 <div class="detail-label">{"Primary Key"}</div>
                                 <div class="password-row">
-                                    <strong ondblclick={on_copy_secret.clone()} class="copy-cell">
+                                    <div ondblclick={on_copy_secret.clone()} class={classes!("copy-cell", "field-value", "mono")}>
                                         {if detail_secret_visible { entry.secret.clone() } else { "••••••••••••••••".to_string() }}
-                                    </strong>
-                                    <button class="btn" onclick={on_toggle_detail_secret.clone()}>{"👁"}</button>
-                                    <button class="btn" onclick={on_copy_secret}>{"Copy Key"}</button>
+                                    </div>
+                                    <button class="btn" onclick={on_toggle_detail_secret.clone()}>{if detail_secret_visible { "Hide" } else { "Reveal" }}</button>
+                                    <button class="btn" onclick={on_copy_secret}>{"Copy"}</button>
                                 </div>
                                 <div class="row" style="margin-top:8px;">
-                                    <span class="strength"><i style={format!("width:{}%", (entropy_bits(&entry.secret) / 1.2).min(100.0))}></i></span>
-                                    <span class="muted">{"Maximum entropy"}</span>
+                                    <span class="strength"><i style={format!("width:{}%", (bits / 1.2).min(100.0))}></i></span>
+                                    <span class="muted">{format!("{} security", strength_label(bits))}</span>
                                 </div>
                             </div>
 
                             <div class="detail-field">
-                                <div class="detail-label">{"Website Authority"}</div>
-                                <strong>{format!("https://{}.com", entry.service.to_ascii_lowercase().replace(' ', ""))}</strong>
+                                <div class="detail-label">{"Website"}</div>
+                                <div class="field-value mono">{format!("https://{}.com", entry.service.to_ascii_lowercase().replace(' ', ""))}</div>
+                            </div>
+
+                            <div class="detail-field">
+                                <div class="detail-label">{"Notes"}</div>
+                                <div class="muted">{entry.notes.clone().unwrap_or_else(|| "No notes for this credential.".to_string())}</div>
                             </div>
 
                             if editor_open {
                                 <div class="section" style="margin-top:10px;">
-                                    <div style="font-weight:700; margin-bottom: 8px;">{"Edit Credentials"}</div>
+                                    <div style="font-weight:700; margin-bottom: 8px;">{"Edit Entry"}</div>
                                     <input class="input" placeholder="Service" value={draft.service.clone()} oninput={on_draft_service}/>
                                     <input class="input" placeholder="Username" value={draft.username.clone()} oninput={on_draft_username}/>
                                     <div class="row">
                                         <input class="input" type={if show_secret { "text" } else { "password" }} placeholder="Password" value={draft.secret.clone()} oninput={on_draft_secret}/>
                                         <button class="btn" onclick={on_toggle_form_secret.clone()}>{"👁"}</button>
-                                        <button
-                                            class="btn"
-                                            onclick={{
-                                                let draft_state = draft_state.clone();
-                                                let generated = generated.clone();
-                                                Callback::from(move |_| {
-                                                    let mut next = (*draft_state).clone();
-                                                    next.secret = generated.clone();
-                                                    draft_state.set(next);
-                                                })
-                                            }}
-                                        >
-                                            {"Generate"}
-                                        </button>
+                                        <button class="btn" onclick={on_generate_and_fill.clone()}>{"Generate"}</button>
                                     </div>
                                     <textarea class="textarea" placeholder="Security notes" value={draft.notes.clone()} oninput={on_draft_notes}></textarea>
                                     <div class="row" style="justify-content:flex-end; margin-top: 8px;">
@@ -1165,21 +1266,23 @@ button:disabled { cursor: not-allowed; }
                             }
                         </div>
 
-                        <aside>
+                        <aside class="action-rail">
                             <div class="sidebar-card">
-                                <div class="detail-label">{"Vault Controls"}</div>
-                                <button class="btn" style="width:100%; margin-bottom:6px;" onclick={on_edit}>{"Edit Credentials"}</button>
-                                <button class="btn" style="width:100%; margin-bottom:6px;">{"Password History"}</button>
-                                <button class="btn danger" style="width:100%;" onclick={on_purge}>{"Purge Entry"}</button>
+                                <div class="detail-label">{"Actions"}</div>
+                                <button class="btn success" style="width:100%;" onclick={on_edit}>{"Edit Entry"}</button>
                             </div>
                             <div class="sidebar-card">
-                                <div class="detail-label">{"Security Notes"}</div>
-                                <div class="muted">{entry.notes.clone().unwrap_or_else(|| "No notes for this credential.".to_string())}</div>
-                                <div style="margin-top: 10px;">
-                                    <div class="muted">{format!("Last audited: {}", Utc::now().format("%b %d, %Y"))}</div>
-                                    <div class="muted">{format!("Created: {}", entry.updated_at.format("%b %d, %Y"))}</div>
-                                    <div style="color: var(--teal); margin-top: 5px;">{"ENGINEERING"}</div>
-                                </div>
+                                <div class="detail-label">{"Metadata"}</div>
+                                <div class="muted">{format!("Last modified: {}", entry.updated_at.format("%b %d, %Y %H:%M UTC"))}</div>
+                                <div class="muted" style="margin-top:6px;">{format!("Record id: {}", entry.id)}</div>
+                                if let Some(event_id) = &entry.last_event_id {
+                                    <div class="muted" style="margin-top:6px;">{format!("Last sync event: {}", event_id)}</div>
+                                }
+                            </div>
+                            <div class="sidebar-card danger-zone">
+                                <div class="detail-label" style="color:#ff9aa4;">{"Danger Zone"}</div>
+                                <div class="muted">{"This action permanently deletes the credential from your local vault."}</div>
+                                <button class="btn danger" style="width:100%; margin-top:10px;" onclick={on_purge}>{"Permanently Delete"}</button>
                             </div>
                         </aside>
                     </div>
@@ -1205,6 +1308,9 @@ button:disabled { cursor: not-allowed; }
                     </div>
 
                     <div class="section">
+                        if !unlocked {
+                            <div class="muted" style="margin-bottom:10px;">{"Unlock to load your vault entries."}</div>
+                        }
                         <table class="table">
                             <thead>
                                 <tr>
@@ -1274,16 +1380,29 @@ button:disabled { cursor: not-allowed; }
                             <h3 style="margin-top:0;">{"Advanced Security Analysis"}</h3>
                             <div class="muted">{format!("{} passwords should be rotated to maintain absolute precision.", weak_count)}</div>
                             <div class="row" style="margin-top:10px;">
-                                <button class="btn" onclick={on_add_item}>{"Add Item"}</button>
+                                <button class="btn" onclick={on_add_item} disabled={!unlocked}>{"Add Item"}</button>
                             </div>
                         </div>
                         <div class="highlight" style="border-color:#246f5a; background:#17352f;">
                             <h3 style="margin-top:0; color:#7cf0ca;">{"Rapid Generator"}</h3>
                             <div class="muted" style="color:#b8e8d8;">{"Create high-entropy randomized keys instantly."}</div>
+                            <div style="margin-top:10px;">
+                                <div class="detail-label">{"Length"}</div>
+                                <div class="row">
+                                    <input class="range" type="range" min="8" max="64" value={gen_len.to_string()} oninput={on_gen_len}/>
+                                    <strong>{gen_len}</strong>
+                                </div>
+                                <div class="row" style="flex-wrap:wrap; margin-top:8px;">
+                                    <label class="row"><input type="checkbox" checked={gen_upper} onchange={on_gen_upper}/><span>{"A-Z"}</span></label>
+                                    <label class="row"><input type="checkbox" checked={gen_lower} onchange={on_gen_lower}/><span>{"a-z"}</span></label>
+                                    <label class="row"><input type="checkbox" checked={gen_numbers} onchange={on_gen_numbers}/><span>{"0-9"}</span></label>
+                                    <label class="row"><input type="checkbox" checked={gen_symbols} onchange={on_gen_symbols}/><span>{"!@#"}</span></label>
+                                </div>
+                            </div>
                             <div style="margin-top:12px; font-weight:700; font-family:'JetBrains Mono', monospace; overflow-wrap:anywhere;">{generated.clone()}</div>
                             <div class="row" style="margin-top:10px;">
                                 <button class="btn" onclick={on_generate.clone()}>{"Regenerate"}</button>
-                                <button class="btn success" onclick={on_use_generated}>{"Use in Add Entry"}</button>
+                                <button class="btn success" onclick={on_use_generated} disabled={!unlocked}>{"Use in Add Entry"}</button>
                             </div>
                         </div>
                     </div>
@@ -1296,20 +1415,7 @@ button:disabled { cursor: not-allowed; }
                             <div class="row">
                                 <input class="input" type={if show_secret { "text" } else { "password" }} placeholder="Password" value={draft.secret.clone()} oninput={on_draft_secret}/>
                                 <button class="btn" onclick={on_toggle_form_secret}>{"👁"}</button>
-                                <button
-                                    class="btn"
-                                    onclick={{
-                                        let draft_state = draft_state.clone();
-                                        let generated = generated.clone();
-                                        Callback::from(move |_| {
-                                            let mut next = (*draft_state).clone();
-                                            next.secret = generated.clone();
-                                            draft_state.set(next);
-                                        })
-                                    }}
-                                >
-                                    {"Generate"}
-                                </button>
+                                <button class="btn" onclick={on_generate_and_fill}>{"Generate"}</button>
                             </div>
                             <textarea class="textarea" placeholder="Notes" value={draft.notes.clone()} oninput={on_draft_notes}></textarea>
                             <div class="row" style="justify-content:flex-end; margin-top: 8px;">
@@ -1631,18 +1737,6 @@ button:disabled { cursor: not-allowed; }
                 copy_notice.set(Some("Copy failed".to_string()));
             }
         });
-    }
-
-    fn load_entries() -> Vec<PasswordEntry> {
-        let Some(storage) = local_storage() else {
-            return vec![];
-        };
-
-        let Ok(Some(raw)) = storage.get_item(STORAGE_KEY) else {
-            return vec![];
-        };
-
-        serde_json::from_str::<Vec<PasswordEntry>>(&raw).unwrap_or_default()
     }
 
     fn save_entries(entries: &[PasswordEntry]) {
