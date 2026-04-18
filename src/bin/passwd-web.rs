@@ -1316,6 +1316,7 @@ button:disabled { cursor: not-allowed; }
                 </>
             }
         } else {
+            let generated_bits = entropy_bits(&generated);
             html! {
                 <>
                     <div class="explorer-head">
@@ -1424,6 +1425,10 @@ button:disabled { cursor: not-allowed; }
                                 </div>
                             </div>
                             <div style="margin-top:12px; font-weight:700; font-family:'JetBrains Mono', monospace; overflow-wrap:anywhere;">{generated.clone()}</div>
+                            <div class="row" style="margin-top:8px;">
+                                <span class="strength"><i style={format!("width:{}%", (generated_bits / 1.2).min(100.0))}></i></span>
+                                <span class="muted">{format!("{generated_bits:.1} bits ({})", strength_label(generated_bits))}</span>
+                            </div>
                             <div class="row" style="margin-top:10px;">
                                 <button class="btn" onclick={on_generate.clone()}>{"Regenerate"}</button>
                                 <button class="btn success" onclick={on_use_generated} disabled={!unlocked}>{"Use in Add Entry"}</button>
@@ -1458,6 +1463,7 @@ button:disabled { cursor: not-allowed; }
         on_save_draft: Callback<MouseEvent>,
         on_cancel_draft: Callback<MouseEvent>,
     ) -> Html {
+        let draft_bits = entropy_bits(&draft.secret);
         html! {
             <>
                 <h2 style="margin:0; font-size:2.2rem; font-family:'Space Grotesk', 'Segoe UI', sans-serif;">{"Add Entry"}</h2>
@@ -1479,6 +1485,10 @@ button:disabled { cursor: not-allowed; }
                         <label class="row"><input type="checkbox" checked={gen_lower} onchange={on_gen_lower}/><span>{"a-z"}</span></label>
                         <label class="row"><input type="checkbox" checked={gen_numbers} onchange={on_gen_numbers}/><span>{"0-9"}</span></label>
                         <label class="row"><input type="checkbox" checked={gen_symbols} onchange={on_gen_symbols}/><span>{"!@#"}</span></label>
+                    </div>
+                    <div class="row" style="margin-top:8px;">
+                        <span class="strength"><i style={format!("width:{}%", (draft_bits / 1.2).min(100.0))}></i></span>
+                        <span class="muted">{format!("Current password entropy: {draft_bits:.1} bits ({})", strength_label(draft_bits))}</span>
                     </div>
                     <textarea class="textarea" placeholder="Notes" value={draft.notes.clone()} oninput={on_draft_notes}></textarea>
                     <div class="row" style="justify-content:flex-end; margin-top: 8px;">
