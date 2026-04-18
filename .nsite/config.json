@@ -1,7 +1,7 @@
 {
   "$schema": "https://nsyte.run/schemas/config.schema.json",
   "relays": ["wss://relay.nsite.lol","wss://relay.damus.io","wss://nos.lol"],
-  "servers": ["https://cdn.hzrd149.com","https://cdn.sovbit.host"],
+  "servers": ["https://blossom.primal.net","https://cdn.hzrd149.com","https://cdn.sovbit.host"],
   "id": null,
   "title": "passwd",
   "description": "Password manager using NIP17"

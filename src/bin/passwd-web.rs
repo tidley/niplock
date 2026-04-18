@@ -12,7 +12,7 @@ mod web {
     use chrono::{DateTime, Utc};
     use gloo_events::EventListener;
     use js_sys::Math;
-    use nostr_sdk::prelude::ToBech32;
+    use nostr_sdk::prelude::{Keys, NostrConnectURI, RelayUrl, ToBech32};
     use passwd::model::PasswordEntry;
     use passwd::nostr_sync::{NostrSync, signer_from_input};
     use uuid::Uuid;
@@ -500,6 +500,8 @@ button:disabled { cursor: not-allowed; }
         let unlock_error = use_state(|| None::<String>);
         let unlock_panel_open = use_state(|| false);
         let unlock_method = use_state(|| UnlockMethod::Nsec);
+        let amber_uri = use_state(|| None::<String>);
+        let amber_session_credential = use_state(|| None::<String>);
         let unlocked = use_state(|| false);
         let mobile_menu_open = use_state(|| false);
 
@@ -818,6 +820,8 @@ button:disabled { cursor: not-allowed; }
             let unlock_error = unlock_error.clone();
             let active_npub = active_npub.clone();
             let signer_credential = signer_credential.clone();
+            let amber_uri = amber_uri.clone();
+            let amber_session_credential = amber_session_credential.clone();
             let entries = entries.clone();
             let selected_id = selected_id.clone();
             let editor_open = editor_open.clone();
@@ -882,6 +886,8 @@ button:disabled { cursor: not-allowed; }
                     unlock_panel_open.set(false);
                     unlock_error.set(None);
                     active_npub.set(None);
+                    amber_uri.set(None);
+                    amber_session_credential.set(None);
                     entries.set(vec![]);
                     selected_id.set(None);
                     editor_open.set(false);
@@ -899,7 +905,41 @@ button:disabled { cursor: not-allowed; }
         };
         let on_unlock_method_amber = {
             let unlock_method = unlock_method.clone();
-            Callback::from(move |_| unlock_method.set(UnlockMethod::Amber))
+            let amber_uri = amber_uri.clone();
+            let amber_session_credential = amber_session_credential.clone();
+            let unlock_error = unlock_error.clone();
+            Callback::from(move |_| {
+                unlock_method.set(UnlockMethod::Amber);
+                let uri = if let Some(existing) = &*amber_uri {
+                    existing.clone()
+                } else {
+                    let session_keys = Keys::generate();
+                    let relay_urls: Vec<RelayUrl> = DEFAULT_RELAYS
+                        .iter()
+                        .filter_map(|r| RelayUrl::parse(*r).ok())
+                        .collect();
+                    let uri =
+                        NostrConnectURI::client(session_keys.public_key(), relay_urls, "NipLock")
+                            .to_string();
+                    let app_key = match session_keys.secret_key().to_bech32() {
+                        Ok(v) => v,
+                        Err(err) => {
+                            unlock_error
+                                .set(Some(format!("Failed to create Amber session: {err}")));
+                            return;
+                        }
+                    };
+                    amber_uri.set(Some(uri.clone()));
+                    amber_session_credential.set(Some(format!("{uri}::appkey={app_key}")));
+                    uri
+                };
+                if let Some(win) = window() {
+                    let _ = win.location().set_href(&uri);
+                }
+                unlock_error.set(Some(
+                    "Opened Amber. Approve and then tap Unlock + Sync.".to_string(),
+                ));
+            })
         };
         let on_unlock_method_nip07 = {
             let unlock_method = unlock_method.clone();
@@ -919,6 +959,8 @@ button:disabled { cursor: not-allowed; }
             let unlock_method = unlock_method.clone();
             let signer_credential = signer_credential.clone();
             let active_npub = active_npub.clone();
+            let amber_uri = amber_uri.clone();
+            let amber_session_credential = amber_session_credential.clone();
             let unlocked = unlocked.clone();
             let unlock_error = unlock_error.clone();
             let unlock_panel_open = unlock_panel_open.clone();
@@ -931,7 +973,44 @@ button:disabled { cursor: not-allowed; }
             Callback::from(move |_| {
                 let credential = match &*unlock_method {
                     UnlockMethod::Nip07 => "nip07".to_string(),
-                    UnlockMethod::Nsec | UnlockMethod::Amber => unlock_input.trim().to_string(),
+                    UnlockMethod::Nsec => unlock_input.trim().to_string(),
+                    UnlockMethod::Amber => {
+                        if let Some(prepared) = &*amber_session_credential {
+                            prepared.clone()
+                        } else {
+                            let session_keys = Keys::generate();
+                            let relay_urls: Vec<RelayUrl> = DEFAULT_RELAYS
+                                .iter()
+                                .filter_map(|r| RelayUrl::parse(*r).ok())
+                                .collect();
+                            let uri = NostrConnectURI::client(
+                                session_keys.public_key(),
+                                relay_urls,
+                                "NipLock",
+                            )
+                            .to_string();
+                            let app_key = match session_keys.secret_key().to_bech32() {
+                                Ok(v) => v,
+                                Err(err) => {
+                                    unlock_error.set(Some(format!(
+                                        "Failed to create Amber session: {err}"
+                                    )));
+                                    return;
+                                }
+                            };
+                            let prepared = format!("{uri}::appkey={app_key}");
+                            amber_uri.set(Some(uri.clone()));
+                            amber_session_credential.set(Some(prepared));
+                            if let Some(win) = window() {
+                                let _ = win.location().set_href(&uri);
+                            }
+                            unlock_error.set(Some(
+                                "Opened Amber link. Approve in Amber, then tap Unlock + Sync again."
+                                    .to_string(),
+                            ));
+                            return;
+                        }
+                    }
                 };
 
                 match signer_from_input(&credential) {
@@ -1289,19 +1368,29 @@ button:disabled { cursor: not-allowed; }
                                     <div style="font-weight:700; margin-bottom:8px;">{"Unlock Vault Sync"}</div>
                                     <div class="row" style="margin-bottom:8px;">
                                         <button class={classes!("btn", if *unlock_method == UnlockMethod::Nsec { Some("primary") } else { None })} onclick={on_unlock_method_nsec}>{"NSEC"}</button>
-                                        <button class={classes!("btn", if *unlock_method == UnlockMethod::Amber { Some("primary") } else { None })} onclick={on_unlock_method_amber}>{"Amber / Bunker"}</button>
+                                        <button class={classes!("btn", if *unlock_method == UnlockMethod::Amber { Some("primary") } else { None })} onclick={on_unlock_method_amber}>{"Amber"}</button>
                                         <button class={classes!("btn", if *unlock_method == UnlockMethod::Nip07 { Some("primary") } else { None })} onclick={on_unlock_method_nip07}>{"nos2xfox"}</button>
                                     </div>
                                     if *unlock_method == UnlockMethod::Nip07 {
                                         <div class="muted" style="margin-top: 8px; font-size: 0.85rem;">{"Using browser signer via NIP-07 (nos2xfox)."}</div>
                                     } else {
-                                        <input
-                                            class="input"
-                                            type={if *unlock_method == UnlockMethod::Nsec { "password" } else { "text" }}
-                                            placeholder={if *unlock_method == UnlockMethod::Nsec { "nsec1..." } else { "bunker://... or nostrconnect://..." }}
-                                            value={(*unlock_input).clone()}
-                                            oninput={on_unlock_input.clone()}
-                                        />
+                                        if *unlock_method == UnlockMethod::Nsec {
+                                            <input
+                                                class="input"
+                                                type="password"
+                                                placeholder="nsec1..."
+                                                value={(*unlock_input).clone()}
+                                                oninput={on_unlock_input.clone()}
+                                            />
+                                        } else if let Some(uri) = &*amber_uri {
+                                            <div class="muted" style="margin-top: 8px; font-size: 0.8rem; overflow-wrap:anywhere;">
+                                                {format!("Amber link: {uri}")}
+                                            </div>
+                                        } else {
+                                            <div class="muted" style="margin-top: 8px; font-size: 0.8rem;">
+                                                {"Tap Amber to open the Amber app, then tap Unlock + Sync."}
+                                            </div>
+                                        }
                                     }
                                     if let Some(err) = &*unlock_error {
                                         <div style="color: var(--err); margin-top: 8px; font-size: 0.85rem;">{err.clone()}</div>

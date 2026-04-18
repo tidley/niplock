@@ -204,6 +204,15 @@ pub fn signer_from_input(input: &str) -> Result<Arc<dyn NostrSigner>> {
         }
     }
 
+    if let Some((uri_part, app_key)) = credential.split_once("::appkey=") {
+        if uri_part.starts_with("nostrconnect://") {
+            let uri = NostrConnectURI::parse(uri_part)?;
+            let app_keys = Keys::parse(app_key)?;
+            let signer = NostrConnect::new(uri, app_keys, Duration::from_secs(25), None)?;
+            return Ok(signer.into_nostr_signer());
+        }
+    }
+
     if credential.starts_with("bunker://") || credential.starts_with("nostrconnect://") {
         let uri = NostrConnectURI::parse(credential)?;
         let session_keys = Keys::generate();
