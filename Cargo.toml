@@ -1,12 +1,14 @@
 [package]
 name = "niplock"
-version = "0.2.0"
+version = "0.2.21"
 edition = "2024"
 
 [dependencies]
 anyhow = "1.0.100"
+async-utility = "0.3.1"
 chrono = { version = "0.4.42", features = ["clock", "serde"] }
 dirs = "6.0.0"
+futures-util = "0.3.32"
 nostr-connect = "0.44.0"
 nostr-sdk = { version = "0.44.1", features = ["all-nips"] }
 serde = { version = "1.0.228", features = ["derive"] }
@@ -20,7 +22,7 @@ tokio = { version = "1.52.1", features = ["macros", "rt-multi-thread", "signal",
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 gloo-events = "0.2.0"
-gloo-timers = "0.3.0"
+gloo-timers = { version = "0.3.0", features = ["futures"] }
 js-sys = "0.3.82"
 nostr-browser-signer = "0.44.2"
 wasm-bindgen-futures = "0.4.55"

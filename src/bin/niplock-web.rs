@@ -12,24 +12,37 @@ mod web {
     use chrono::{DateTime, Utc};
     use gloo_events::EventListener;
     use gloo_timers::callback::Timeout;
+    use gloo_timers::future::TimeoutFuture;
     use js_sys::{Date, Math};
     use niplock::model::PasswordEntry;
     use niplock::nostr_sync::{NostrSync, signer_from_input};
-    use nostr_sdk::prelude::{Keys, NostrConnectURI, RelayUrl, ToBech32};
+    use nostr_sdk::JsonUtil;
+    use nostr_sdk::prelude::{
+        Client, EventBuilder, Filter, Keys, Kind, NostrConnectMessage, NostrConnectRequest,
+        NostrConnectResponse, NostrConnectURI, RelayUrl, ToBech32, nip44,
+    };
     use uuid::Uuid;
     use wasm_bindgen_futures::{JsFuture, spawn_local};
     use web_sys::{HtmlInputElement, HtmlTextAreaElement, WebSocket, window};
     use yew::prelude::*;
 
     const STORAGE_KEY: &str = "niplock.vault.v1";
+    const ACTIVE_NPUB_STORAGE_KEY: &str = "niplock.active_npub.v1";
     const RELAYS_STORAGE_KEY: &str = "niplock.relays.v1";
-    const MAX_SYNC_RELAYS: usize = 4;
+    const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
+    const MAX_SYNC_RELAYS: usize = 6;
+    const AMBER_NIP46_PERMS: &str = "get_public_key,sign_event,nip44_encrypt,nip44_decrypt";
+    const PREAPPROVED_NIP46_MARKER: &str = "::preapproved";
+    const AMBER_APPROVAL_POLL_INTERVAL_MS: u32 = 2_000;
+    const AMBER_APPROVAL_POLL_ATTEMPTS: u32 = 60;
     const RELAY_PROBE_COOLDOWN_MS: f64 = 30_000.0;
     const DEFAULT_RELAYS: [&str; MAX_SYNC_RELAYS] = [
         "wss://nip17.com",
         "wss://nip17.tomdwyer.uk",
-        "wss://nos.lol",
-        "wss://nostr.mom",
+        "wss://relay.momostr.pink",
+        "wss://relay.bao.network",
+        "wss://relay.cloistr.xyz",
+        "wss://relay.paulstephenborile.com",
     ];
 
     const CSS: &str = r#"
@@ -526,6 +539,7 @@ button:disabled { cursor: not-allowed; }
         let unlock_method = use_state(|| UnlockMethod::Nsec);
         let amber_uri = use_state(|| None::<String>);
         let amber_session_credential = use_state(|| None::<String>);
+        let amber_debug = use_state(Vec::<String>::new);
         let unlocked = use_state(|| false);
         let mobile_menu_open = use_state(|| false);
 
@@ -551,6 +565,21 @@ button:disabled { cursor: not-allowed; }
         let gen_numbers = use_state(|| true);
         let gen_symbols = use_state(|| true);
         let generated = use_state(|| generate_password(18, true, true, true, true));
+
+        // Keep UI status consistent with actual in-flight sync activity.
+        {
+            let sync_state = sync_state.clone();
+            let sync_in_flight = sync_in_flight.clone();
+            use_effect_with(
+                (*sync_in_flight, (*sync_state).clone()),
+                move |(in_flight, state)| {
+                    if !*in_flight && matches!(state, SyncState::Syncing) {
+                        sync_state.set(SyncState::Idle);
+                    }
+                    || ()
+                },
+            );
+        }
 
         {
             let page = page.clone();
@@ -662,10 +691,6 @@ button:disabled { cursor: not-allowed; }
 
         let start_live_listener = {
             let signer_credential = signer_credential.clone();
-            let entries = entries.clone();
-            let sync_state = sync_state.clone();
-            let last_sync = last_sync.clone();
-            let sync_in_flight = sync_in_flight.clone();
             let live_sync = live_sync.clone();
             let live_subscription_id = live_subscription_id.clone();
             let live_listener_running = live_listener_running.clone();
@@ -678,10 +703,6 @@ button:disabled { cursor: not-allowed; }
                 *live_listener_running.borrow_mut() = true;
 
                 let signer_credential = signer_credential.clone();
-                let entries = entries.clone();
-                let sync_state = sync_state.clone();
-                let last_sync = last_sync.clone();
-                let sync_in_flight = sync_in_flight.clone();
                 let live_sync = live_sync.clone();
                 let live_subscription_id = live_subscription_id.clone();
                 let live_listener_running = live_listener_running.clone();
@@ -733,16 +754,8 @@ button:disabled { cursor: not-allowed; }
                             break;
                         }
 
-                        spawn_sync(
-                            (*signer_credential).clone(),
-                            (*entries).clone(),
-                            relays.clone(),
-                            entries.clone(),
-                            sync_state.clone(),
-                            last_sync.clone(),
-                            sync_in_flight.clone(),
-                            live_sync.clone(),
-                        );
+                        // Disabled automatic live-triggered sync to avoid perpetual sync loops
+                        // when relays deliver our own recently published Gift Wrap events.
                     }
 
                     *live_listener_running.borrow_mut() = false;
@@ -857,6 +870,7 @@ button:disabled { cursor: not-allowed; }
             let signer_credential = signer_credential.clone();
             let amber_uri = amber_uri.clone();
             let amber_session_credential = amber_session_credential.clone();
+            let amber_debug = amber_debug.clone();
             let entries = entries.clone();
             let selected_id = selected_id.clone();
             let editor_open = editor_open.clone();
@@ -867,7 +881,6 @@ button:disabled { cursor: not-allowed; }
             let relays = relays.clone();
             Callback::from(move |_| {
                 if *unlocked {
-                    sync_state.set(SyncState::Syncing);
                     let live_sync = live_sync.clone();
                     let sync_state = sync_state.clone();
                     let signer_credential = (*signer_credential).clone();
@@ -920,6 +933,8 @@ button:disabled { cursor: not-allowed; }
                     active_npub.set(None);
                     amber_uri.set(None);
                     amber_session_credential.set(None);
+                    amber_debug.set(Vec::new());
+                    set_active_npub_storage(None);
                     entries.set(vec![]);
                     selected_id.set(None);
                     editor_open.set(false);
@@ -933,12 +948,17 @@ button:disabled { cursor: not-allowed; }
 
         let on_unlock_method_nsec = {
             let unlock_method = unlock_method.clone();
-            Callback::from(move |_| unlock_method.set(UnlockMethod::Nsec))
+            let amber_debug = amber_debug.clone();
+            Callback::from(move |_| {
+                unlock_method.set(UnlockMethod::Nsec);
+                amber_debug.set(Vec::new());
+            })
         };
         let on_unlock_method_amber = {
             let unlock_method = unlock_method.clone();
             let amber_uri = amber_uri.clone();
             let amber_session_credential = amber_session_credential.clone();
+            let amber_debug = amber_debug.clone();
             let unlock_error = unlock_error.clone();
             let relays = relays.clone();
             let signer_credential = signer_credential.clone();
@@ -950,18 +970,28 @@ button:disabled { cursor: not-allowed; }
             let last_sync = last_sync.clone();
             let sync_in_flight = sync_in_flight.clone();
             let live_sync = live_sync.clone();
-            let start_live_listener = start_live_listener.clone();
             Callback::from(move |_| {
                 unlock_method.set(UnlockMethod::Amber);
                 let (uri, credential) = if let (Some(uri), Some(credential)) =
                     (&*amber_uri, &*amber_session_credential)
                 {
+                    push_amber_debug(
+                        amber_debug.clone(),
+                        "Amber: reusing prepared NIP-46 session".to_string(),
+                    );
                     (uri.clone(), credential.clone())
                 } else {
                     match prepare_amber_session(&relays) {
                         Ok(v) => {
                             amber_uri.set(Some(v.0.clone()));
                             amber_session_credential.set(Some(v.1.clone()));
+                            amber_debug.set(vec![
+                                format!(
+                                    "Amber: prepared NIP-46 session for {} relay(s)",
+                                    relays.len()
+                                ),
+                                "Amber: URI includes secret and requested permissions".to_string(),
+                            ]);
                             v
                         }
                         Err(err) => {
@@ -972,30 +1002,41 @@ button:disabled { cursor: not-allowed; }
                     }
                 };
 
-                spawn_amber_unlock(
-                    credential,
-                    (*relays).clone(),
-                    entries.clone(),
-                    signer_credential.clone(),
-                    active_npub.clone(),
-                    unlocked.clone(),
-                    unlock_error.clone(),
-                    unlock_panel_open.clone(),
-                    sync_state.clone(),
-                    last_sync.clone(),
-                    sync_in_flight.clone(),
-                    live_sync.clone(),
-                    start_live_listener.clone(),
+                open_external_uri(&uri);
+                push_amber_debug(
+                    amber_debug.clone(),
+                    "Amber: opened external URI".to_string(),
                 );
-                open_external_uri_after(uri.clone(), 700);
                 unlock_error.set(Some(
-                    "Opened Amber. Approve niplock to finish unlock.".to_string(),
+                    "Opened Amber. Approve niplock; sync will continue here.".to_string(),
                 ));
+
+                if !*sync_in_flight {
+                    spawn_amber_unlock(
+                        credential,
+                        (*relays).clone(),
+                        entries.clone(),
+                        signer_credential.clone(),
+                        active_npub.clone(),
+                        unlocked.clone(),
+                        unlock_error.clone(),
+                        unlock_panel_open.clone(),
+                        sync_state.clone(),
+                        last_sync.clone(),
+                        sync_in_flight.clone(),
+                        live_sync.clone(),
+                        amber_debug.clone(),
+                    );
+                }
             })
         };
         let on_unlock_method_nip07 = {
             let unlock_method = unlock_method.clone();
-            Callback::from(move |_| unlock_method.set(UnlockMethod::Nip07))
+            let amber_debug = amber_debug.clone();
+            Callback::from(move |_| {
+                unlock_method.set(UnlockMethod::Nip07);
+                amber_debug.set(Vec::new());
+            })
         };
 
         let on_unlock_input = {
@@ -1013,6 +1054,7 @@ button:disabled { cursor: not-allowed; }
             let active_npub = active_npub.clone();
             let amber_uri = amber_uri.clone();
             let amber_session_credential = amber_session_credential.clone();
+            let amber_debug = amber_debug.clone();
             let unlocked = unlocked.clone();
             let unlock_error = unlock_error.clone();
             let unlock_panel_open = unlock_panel_open.clone();
@@ -1021,7 +1063,6 @@ button:disabled { cursor: not-allowed; }
             let last_sync = last_sync.clone();
             let sync_in_flight = sync_in_flight.clone();
             let live_sync = live_sync.clone();
-            let start_live_listener = start_live_listener.clone();
             let relays = relays.clone();
             Callback::from(move |_| {
                 let credential = match &*unlock_method {
@@ -1030,14 +1071,15 @@ button:disabled { cursor: not-allowed; }
                     UnlockMethod::Amber => {
                         if let Some(prepared) = &*amber_session_credential {
                             if *sync_in_flight {
+                                push_amber_debug(
+                                    amber_debug.clone(),
+                                    "Amber: unlock already in progress".to_string(),
+                                );
                                 unlock_error.set(Some(
                                     "Waiting for Amber approval. Approve niplock in Amber."
                                         .to_string(),
                                 ));
                                 return;
-                            }
-                            if let Some(uri) = &*amber_uri {
-                                open_external_uri_after(uri.clone(), 700);
                             }
                             spawn_amber_unlock(
                                 prepared.clone(),
@@ -1052,7 +1094,7 @@ button:disabled { cursor: not-allowed; }
                                 last_sync.clone(),
                                 sync_in_flight.clone(),
                                 live_sync.clone(),
-                                start_live_listener.clone(),
+                                amber_debug.clone(),
                             );
                             return;
                         } else {
@@ -1067,6 +1109,13 @@ button:disabled { cursor: not-allowed; }
                             };
                             amber_uri.set(Some(uri.clone()));
                             amber_session_credential.set(Some(prepared.clone()));
+                            amber_debug.set(vec![
+                                format!(
+                                    "Amber: prepared NIP-46 session for {} relay(s)",
+                                    relays.len()
+                                ),
+                                "Amber: URI includes secret and requested permissions".to_string(),
+                            ]);
                             spawn_amber_unlock(
                                 prepared,
                                 (*relays).clone(),
@@ -1080,9 +1129,13 @@ button:disabled { cursor: not-allowed; }
                                 last_sync.clone(),
                                 sync_in_flight.clone(),
                                 live_sync.clone(),
-                                start_live_listener.clone(),
+                                amber_debug.clone(),
                             );
-                            open_external_uri_after(uri.clone(), 700);
+                            open_external_uri(&uri);
+                            push_amber_debug(
+                                amber_debug.clone(),
+                                "Amber: opened external URI".to_string(),
+                            );
                             unlock_error.set(Some(
                                 "Opened Amber. Approve niplock to finish unlock.".to_string(),
                             ));
@@ -1093,31 +1146,44 @@ button:disabled { cursor: not-allowed; }
 
                 match signer_from_input(&credential) {
                     Ok(signer) => {
-                        signer_credential.set(credential.clone());
-                        {
-                            let active_npub = active_npub.clone();
-                            spawn_local(async move {
-                                let next = match signer.get_public_key().await {
-                                    Ok(pubkey) => pubkey.to_bech32().ok(),
-                                    Err(_) => None,
-                                };
-                                active_npub.set(next);
-                            });
-                        }
-                        unlocked.set(true);
-                        unlock_error.set(None);
-                        unlock_panel_open.set(false);
-                        spawn_sync(
-                            credential,
-                            (*entries).clone(),
-                            (*relays).clone(),
-                            entries.clone(),
-                            sync_state.clone(),
-                            last_sync.clone(),
-                            sync_in_flight.clone(),
-                            live_sync.clone(),
-                        );
-                        start_live_listener.emit(());
+                        let credential_for_sync = credential.clone();
+                        let relays_for_sync = (*relays).clone();
+                        let entries_state = entries.clone();
+                        let signer_credential_state = signer_credential.clone();
+                        let active_npub_state = active_npub.clone();
+                        let unlocked_state = unlocked.clone();
+                        let unlock_error_state = unlock_error.clone();
+                        let unlock_panel_open_state = unlock_panel_open.clone();
+                        let sync_state_state = sync_state.clone();
+                        let last_sync_state = last_sync.clone();
+                        let sync_in_flight_state = sync_in_flight.clone();
+                        let live_sync_state = live_sync.clone();
+                        spawn_local(async move {
+                            let next_npub = match signer.get_public_key().await {
+                                Ok(pubkey) => pubkey.to_bech32().ok(),
+                                Err(_) => None,
+                            };
+                            set_active_npub_storage(next_npub.as_deref());
+                            active_npub_state.set(next_npub);
+
+                            signer_credential_state.set(credential_for_sync.clone());
+                            let cached_entries =
+                                merge_entry_lists(&*entries_state, &load_entries());
+                            entries_state.set(cached_entries.clone());
+                            unlocked_state.set(true);
+                            unlock_error_state.set(None);
+                            unlock_panel_open_state.set(false);
+                            spawn_sync(
+                                credential_for_sync,
+                                cached_entries,
+                                relays_for_sync,
+                                entries_state.clone(),
+                                sync_state_state,
+                                last_sync_state,
+                                sync_in_flight_state,
+                                live_sync_state,
+                            );
+                        });
                     }
                     Err(err) => {
                         unlock_error.set(Some(format!("Invalid signer credential: {err}")));
@@ -1558,7 +1624,7 @@ button:disabled { cursor: not-allowed; }
                             <button class="menu-btn" onclick={on_toggle_mobile_menu}>{"☰"}</button>
                             <input class="search" placeholder="Search vault..." value={(*search).clone()} oninput={on_search} />
                             <div class="top-right">
-                                <button class="btn" onclick={on_sync_now.clone()} disabled={!*unlocked}>{"Refresh"}</button>
+                                <button class="btn" onclick={on_sync_now.clone()} disabled={!*unlocked}>{"Sync"}</button>
                                 <button class="unlock" onclick={on_toggle_unlock_panel}>{ if *unlocked { "Lock" } else { "Unlock" } }</button>
                             </div>
                             if *unlock_panel_open {
@@ -1580,13 +1646,20 @@ button:disabled { cursor: not-allowed; }
                                                 value={(*unlock_input).clone()}
                                                 oninput={on_unlock_input.clone()}
                                             />
-                                        } else if let Some(uri) = &*amber_uri {
-                                            <div class="muted" style="margin-top: 8px; font-size: 0.8rem; overflow-wrap:anywhere;">
-                                                {format!("Amber link: {uri}")}
+                                        } else if amber_uri.is_some() {
+                                            <div class="muted" style="margin-top: 8px; font-size: 0.78rem; overflow-wrap:anywhere; font-family:monospace; line-height:1.35;">
+                                                <div style="font-weight:700; color:var(--text); margin-bottom:4px;">{"Amber debug"}</div>
+                                                if amber_debug.is_empty() {
+                                                    <div>{"Amber: session prepared"}</div>
+                                                } else {
+                                                    {for amber_debug.iter().map(|line| html! {
+                                                        <div>{line.clone()}</div>
+                                                    })}
+                                                }
                                             </div>
                                         } else {
                                             <div class="muted" style="margin-top: 8px; font-size: 0.8rem;">
-                                                {"Tap Amber to open the Amber app, then tap Unlock + Sync."}
+                                                {"Tap Amber to open Amber and approve niplock."}
                                             </div>
                                         }
                                     }
@@ -1873,7 +1946,7 @@ button:disabled { cursor: not-allowed; }
                             if editor_open {
                                 <div class="section" style="margin-top:10px;">
                                     <div style="font-weight:700; margin-bottom: 8px;">{"Edit Entry"}</div>
-                                    <input class="input" placeholder="Service" value={draft.service.clone()} oninput={on_draft_service}/>
+                                    <input class="input" placeholder="Title" value={draft.service.clone()} oninput={on_draft_service}/>
                                     <input class="input" placeholder="Username" value={draft.username.clone()} oninput={on_draft_username}/>
                                     <div class="row">
                                         <input class="input" type={if show_secret { "text" } else { "password" }} placeholder="Password" value={draft.secret.clone()} oninput={on_draft_secret}/>
@@ -1942,7 +2015,7 @@ button:disabled { cursor: not-allowed; }
                         <table class="table">
                             <thead>
                                 <tr>
-                                    <th>{"Service"}</th>
+                                    <th>{"Title"}</th>
                                     <th>{"Username"}</th>
                                     <th>{"Strength"}</th>
                                     <th>{"Last Modified"}</th>
@@ -2062,7 +2135,7 @@ button:disabled { cursor: not-allowed; }
             <>
                 <h2 style="margin:0; font-size:2.2rem; font-family:'Space Grotesk', 'Segoe UI', sans-serif;">{"Add Entry"}</h2>
                 <div class="section" style="margin-top:12px; max-width: 760px;">
-                    <input class="input" placeholder="Service" value={draft.service.clone()} oninput={on_draft_service}/>
+                    <input class="input" placeholder="Title" value={draft.service.clone()} oninput={on_draft_service}/>
                     <input class="input" placeholder="Username" value={draft.username.clone()} oninput={on_draft_username}/>
                     <div class="row">
                         <input class="input" type={if show_secret { "text" } else { "password" }} placeholder="Password" value={draft.secret.clone()} oninput={on_draft_secret}/>
@@ -2182,7 +2255,7 @@ button:disabled { cursor: not-allowed; }
                     <table class="table">
                         <thead>
                             <tr>
-                                <th>{"Service"}</th>
+                                <th>{"Title"}</th>
                                 <th>{"Username"}</th>
                                 <th>{"Entropy"}</th>
                                 <th>{"Action"}</th>
@@ -2260,7 +2333,7 @@ button:disabled { cursor: not-allowed; }
         html! {
             <>
                 <h2 style="margin:0; font-size:2.2rem; font-family:'Space Grotesk', 'Segoe UI', sans-serif;">{"System Preferences"}</h2>
-                <div class="muted" style="margin-top:4px;">{"Version: 0.2"}</div>
+                <div class="muted" style="margin-top:4px;">{format!("Version: {APP_VERSION}")}</div>
 
                 <div class="section">
                     <div class="detail-label">{"Sync State"}</div>
@@ -2325,38 +2398,19 @@ button:disabled { cursor: not-allowed; }
                             let relay_to_remove = relay.clone();
                             let on_remove_relay = on_remove_relay.clone();
                             let on_remove = Callback::from(move |_| on_remove_relay.emit(relay_to_remove.clone()));
-                            html! {
-                                <div class="row" style="justify-content:space-between; margin-top:6px; border:1px solid var(--line); border-radius:6px; padding:8px 10px;">
-                                    <div style="font-family:monospace; overflow-wrap:anywhere; font-size:0.85rem;">{relay.clone()}</div>
-                                    <button class="btn danger" onclick={on_remove} disabled={!unlocked}>{"Remove"}</button>
-                                </div>
-                            }
-                        })}
-                    </div>
-                    <div style="margin-top:10px;">
-                        {for relay_probes.iter().map(|probe| {
-                            let status_color = match probe.state {
-                                RelayProbeState::NotChecked => "var(--muted)",
-                                RelayProbeState::Reachable => "var(--teal)",
-                                RelayProbeState::Unreachable => "var(--err)",
-                                RelayProbeState::Checking => "var(--warn)",
-                            };
-                            let status_text = match probe.state {
-                                RelayProbeState::NotChecked => "Not checked".to_string(),
-                                RelayProbeState::Reachable => {
-                                    if let Some(latency) = probe.latency_ms {
-                                        format!("Reachable ({latency} ms)")
-                                    } else {
-                                        "Reachable".to_string()
-                                    }
-                                }
-                                RelayProbeState::Unreachable => "Unreachable".to_string(),
-                                RelayProbeState::Checking => "Checking...".to_string(),
+                            let probe = relay_probes.iter().find(|probe| probe.relay == *relay);
+                            let (status_color, status_text) = match probe.map(|probe| (&probe.state, probe.latency_ms)) {
+                                Some((RelayProbeState::Reachable, Some(latency))) => ("var(--teal)", format!("Reachable · {latency} ms")),
+                                Some((RelayProbeState::Reachable, None)) => ("var(--teal)", "Reachable".to_string()),
+                                Some((RelayProbeState::Unreachable, _)) => ("var(--err)", "Unreachable".to_string()),
+                                Some((RelayProbeState::Checking, _)) => ("var(--warn)", "Checking...".to_string()),
+                                _ => ("var(--muted)", "Not checked".to_string()),
                             };
                             html! {
-                                <div class="row" style="justify-content:space-between; margin-top:6px; border:1px solid var(--line); border-radius:6px; padding:8px 10px;">
-                                    <div style="font-family:monospace; overflow-wrap:anywhere; font-size:0.85rem;">{probe.relay.clone()}</div>
+                                <div class="row" style="justify-content:space-between; margin-top:6px; border:1px solid var(--line); border-radius:6px; padding:8px 10px; gap:10px;">
+                                    <div style="font-family:monospace; font-size:0.85rem; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; flex:1;">{relay.clone()}</div>
                                     <div style={format!("color:{status_color}; font-weight:600; font-size:0.82rem; white-space:nowrap;")}>{status_text}</div>
+                                    <button class="btn danger" onclick={on_remove} disabled={!unlocked}>{"Remove"}</button>
                                 </div>
                             }
                         })}
@@ -2591,6 +2645,9 @@ button:disabled { cursor: not-allowed; }
 
         let uri =
             NostrConnectURI::client(session_keys.public_key(), relay_urls, "niplock").to_string();
+        let secret = Uuid::new_v4().to_string();
+        let uri = append_query_param(&uri, "secret", &secret);
+        let uri = append_query_param(&uri, "perms", AMBER_NIP46_PERMS);
         let app_key = session_keys
             .secret_key()
             .to_bech32()
@@ -2599,10 +2656,20 @@ button:disabled { cursor: not-allowed; }
         Ok((uri.clone(), format!("{uri}::appkey={app_key}")))
     }
 
+    fn append_query_param(uri: &str, key: &str, value: &str) -> String {
+        let separator = if uri.contains('?') { "&" } else { "?" };
+        format!("{uri}{separator}{key}={value}")
+    }
+
     fn open_external_uri(uri: &str) {
         let Some(win) = window() else {
             return;
         };
+
+        if uri.starts_with("nostrconnect://") || uri.starts_with("bunker://") {
+            let _ = win.location().set_href(uri);
+            return;
+        }
 
         let opened = win.open_with_url_and_target(uri, "_blank").ok().flatten();
         if opened.is_none() {
@@ -2610,8 +2677,14 @@ button:disabled { cursor: not-allowed; }
         }
     }
 
-    fn open_external_uri_after(uri: String, delay_ms: u32) {
-        Timeout::new(delay_ms, move || open_external_uri(&uri)).forget();
+    fn push_amber_debug(debug: UseStateHandle<Vec<String>>, message: String) {
+        let mut next = (*debug).clone();
+        next.push(message);
+        if next.len() > 12 {
+            let excess = next.len() - 12;
+            next.drain(0..excess);
+        }
+        debug.set(next);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2628,9 +2701,13 @@ button:disabled { cursor: not-allowed; }
         last_sync: UseStateHandle<Option<String>>,
         sync_in_flight: UseStateHandle<bool>,
         live_sync: Rc<RefCell<Option<NostrSync>>>,
-        start_live_listener: Callback<()>,
+        amber_debug: UseStateHandle<Vec<String>>,
     ) {
         if *sync_in_flight {
+            push_amber_debug(
+                amber_debug,
+                "Amber: unlock already in progress; waiting for approval".to_string(),
+            );
             unlock_error.set(Some(
                 "Waiting for Amber approval. Approve niplock in Amber.".to_string(),
             ));
@@ -2639,24 +2716,57 @@ button:disabled { cursor: not-allowed; }
 
         sync_in_flight.set(true);
         sync_state.set(SyncState::Syncing);
+        push_amber_debug(
+            amber_debug.clone(),
+            format!(
+                "Amber: starting unlock with {} configured relay(s)",
+                relays.len()
+            ),
+        );
+        let timed_out = Rc::new(RefCell::new(false));
+        let timeout_flag = timed_out.clone();
+        let sync_state_timeout = sync_state.clone();
+        let sync_in_flight_timeout = sync_in_flight.clone();
+        let unlock_error_timeout = unlock_error.clone();
+        let amber_debug_timeout = amber_debug.clone();
+        let watchdog = Timeout::new(45_000, move || {
+            if *sync_in_flight_timeout {
+                *timeout_flag.borrow_mut() = true;
+                push_amber_debug(
+                    amber_debug_timeout.clone(),
+                    "Amber: watchdog timeout while unlock task was still running".to_string(),
+                );
+                unlock_error_timeout
+                    .set(Some("Amber sync timeout. Tap Sync to retry.".to_string()));
+                sync_state_timeout.set(SyncState::Error(
+                    "Amber sync timeout. Tap Sync to retry.".to_string(),
+                ));
+                sync_in_flight_timeout.set(false);
+            }
+        });
         unlock_error.set(Some(
             "Waiting for Amber approval. Approve niplock in Amber.".to_string(),
         ));
 
         spawn_local(async move {
-            let signer = match signer_from_input(&signer_credential) {
+            let _watchdog = watchdog;
+            push_amber_debug(
+                amber_debug.clone(),
+                "Amber: polling relays for approval response".to_string(),
+            );
+            let signer_credential = match wait_for_amber_approval(
+                signer_credential,
+                relays.clone(),
+                amber_debug.clone(),
+            )
+            .await
+            {
                 Ok(v) => v,
                 Err(err) => {
-                    unlock_error.set(Some(format!("Invalid Amber session: {err}")));
-                    sync_state.set(SyncState::Error("Amber session failed".to_string()));
-                    sync_in_flight.set(false);
-                    return;
-                }
-            };
-
-            let public_key = match signer.get_public_key().await {
-                Ok(v) => v,
-                Err(err) => {
+                    push_amber_debug(
+                        amber_debug.clone(),
+                        format!("Amber: approval failed: {err}"),
+                    );
                     unlock_error.set(Some(format!("Amber approval failed: {err}")));
                     sync_state.set(SyncState::Error("Amber approval failed".to_string()));
                     sync_in_flight.set(false);
@@ -2664,9 +2774,145 @@ button:disabled { cursor: not-allowed; }
                 }
             };
 
-            let sync = match NostrSync::new_with_signer(signer, relays).await {
+            let mut signer_credential = signer_credential;
+            push_amber_debug(amber_debug.clone(), "Amber: creating signer".to_string());
+            let mut signer = match signer_from_input(&signer_credential) {
                 Ok(v) => v,
                 Err(err) => {
+                    push_amber_debug(
+                        amber_debug.clone(),
+                        format!("Amber: invalid session: {err}"),
+                    );
+                    unlock_error.set(Some(format!("Invalid Amber session: {err}")));
+                    sync_state.set(SyncState::Error("Amber session failed".to_string()));
+                    sync_in_flight.set(false);
+                    return;
+                }
+            };
+            if *timed_out.borrow() {
+                return;
+            }
+
+            push_amber_debug(
+                amber_debug.clone(),
+                "Amber: requesting public key from signer".to_string(),
+            );
+            let public_key = match signer.get_public_key().await {
+                Ok(v) => {
+                    push_amber_debug(
+                        amber_debug.clone(),
+                        "Amber: signer public key returned".to_string(),
+                    );
+                    v
+                }
+                Err(err) => {
+                    push_amber_debug(
+                        amber_debug.clone(),
+                        format!("Amber: public key failed; replaying approval: {err}"),
+                    );
+                    let replayed = amber_credential_with_replayed_connect(
+                        signer_credential.clone(),
+                        relays.clone(),
+                        amber_debug.clone(),
+                    )
+                    .await;
+                    if let Ok(next_credential) = replayed {
+                        if next_credential != signer_credential {
+                            push_amber_debug(
+                                amber_debug.clone(),
+                                "Amber: replay produced bunker credential; retrying public key"
+                                    .to_string(),
+                            );
+                            if let Ok(next_signer) = signer_from_input(&next_credential) {
+                                match next_signer.get_public_key().await {
+                                    Ok(v) => {
+                                        push_amber_debug(
+                                            amber_debug.clone(),
+                                            "Amber: signer public key returned after replay"
+                                                .to_string(),
+                                        );
+                                        signer_credential = next_credential;
+                                        signer = next_signer;
+                                        v
+                                    }
+                                    Err(retry_err) => {
+                                        push_amber_debug(
+                                            amber_debug.clone(),
+                                            format!(
+                                                "Amber: replay public key retry failed: {retry_err}"
+                                            ),
+                                        );
+                                        unlock_error.set(Some(format!(
+                                            "Amber approval failed: {err}; replay retry failed: {retry_err}"
+                                        )));
+                                        sync_state.set(SyncState::Error(
+                                            "Amber approval failed".to_string(),
+                                        ));
+                                        sync_in_flight.set(false);
+                                        return;
+                                    }
+                                }
+                            } else {
+                                push_amber_debug(
+                                    amber_debug.clone(),
+                                    "Amber: replay credential could not create signer".to_string(),
+                                );
+                                unlock_error.set(Some(format!("Amber approval failed: {err}")));
+                                sync_state
+                                    .set(SyncState::Error("Amber approval failed".to_string()));
+                                sync_in_flight.set(false);
+                                return;
+                            }
+                        } else {
+                            push_amber_debug(
+                                amber_debug.clone(),
+                                "Amber: replay did not find a usable approval".to_string(),
+                            );
+                            unlock_error.set(Some(format!("Amber approval failed: {err}")));
+                            sync_state.set(SyncState::Error("Amber approval failed".to_string()));
+                            sync_in_flight.set(false);
+                            return;
+                        }
+                    } else {
+                        push_amber_debug(
+                            amber_debug.clone(),
+                            "Amber: replay approval lookup failed".to_string(),
+                        );
+                        unlock_error.set(Some(format!("Amber approval failed: {err}")));
+                        sync_state.set(SyncState::Error("Amber approval failed".to_string()));
+                        sync_in_flight.set(false);
+                        return;
+                    }
+                }
+            };
+            push_amber_debug(
+                amber_debug.clone(),
+                "Amber: approved; opening vault before background sync".to_string(),
+            );
+            let public_npub = public_key.to_bech32().ok();
+            set_active_npub_storage(public_npub.as_deref());
+            signer_credential_state.set(signer_credential.clone());
+            active_npub.set(public_npub.clone());
+            unlocked.set(true);
+            unlock_panel_open.set(false);
+            unlock_error.set(None);
+
+            unlock_error.set(Some("Amber approved. Connecting relays...".to_string()));
+            push_amber_debug(
+                amber_debug.clone(),
+                "Amber: approved; creating Nostr sync client".to_string(),
+            );
+
+            let sync = match NostrSync::new_with_signer(signer, relays).await {
+                Ok(v) => {
+                    push_amber_debug(amber_debug.clone(), "Amber: relay client ready".to_string());
+                    v
+                }
+                Err(err) => {
+                    push_amber_debug(
+                        amber_debug.clone(),
+                        format!("Amber: relay client failed: {err}"),
+                    );
                     signer_credential_state.set(signer_credential);
                     active_npub.set(public_key.to_bech32().ok());
                     unlocked.set(true);
@@ -2678,36 +2924,294 @@ button:disabled { cursor: not-allowed; }
                 }
             };
 
-            let local = to_map(&entries_state);
-            match sync.sync(&local).await {
+            unlock_error.set(Some("Amber approved. Syncing vault...".to_string()));
+            let cached_entries = merge_entry_lists(&*entries_state, &load_entries());
+            entries_state.set(cached_entries.clone());
+            let local = to_map(&cached_entries);
+            push_amber_debug(
+                amber_debug.clone(),
+                format!("Amber: syncing vault with {} local entries", local.len()),
+            );
+            let amber_debug_progress = amber_debug.clone();
+            match sync
+                .sync_with_progress(&local, move |message| {
+                    push_amber_debug(amber_debug_progress.clone(), message);
+                })
+                .await
+            {
                 Ok((merged, _summary)) => {
+                    if *timed_out.borrow() {
+                        push_amber_debug(
+                            amber_debug.clone(),
+                            "Amber: sync completed after watchdog; closing unlock panel"
+                                .to_string(),
+                        );
+                    }
+                    push_amber_debug(
+                        amber_debug.clone(),
+                        format!("Amber: sync returned {} merged entries", merged.len()),
+                    );
                     let next = from_map(merged);
                     save_entries(&next);
                     entries_state.set(next);
                     last_sync.set(Some(Utc::now().to_rfc3339()));
                     *live_sync.borrow_mut() = Some(sync);
                     signer_credential_state.set(signer_credential);
-                    active_npub.set(public_key.to_bech32().ok());
+                    active_npub.set(public_npub.clone());
                     unlocked.set(true);
                     unlock_panel_open.set(false);
                     unlock_error.set(None);
                     sync_state.set(SyncState::Idle);
                     sync_in_flight.set(false);
-                    start_live_listener.emit(());
                 }
                 Err(err) => {
+                    if *timed_out.borrow() {
+                        push_amber_debug(
+                            amber_debug.clone(),
+                            "Amber: sync failed after watchdog; showing final error".to_string(),
+                        );
+                    }
+                    push_amber_debug(amber_debug.clone(), format!("Amber: sync failed: {err}"));
                     *live_sync.borrow_mut() = Some(sync);
                     signer_credential_state.set(signer_credential);
-                    active_npub.set(public_key.to_bech32().ok());
+                    active_npub.set(public_npub);
                     unlocked.set(true);
                     unlock_panel_open.set(false);
                     unlock_error.set(Some(format!("Amber connected; sync failed: {err}")));
                     sync_state.set(SyncState::Error(format!("sync failed: {err}")));
                     sync_in_flight.set(false);
-                    start_live_listener.emit(());
                 }
             }
         });
+    }
+
+    async fn wait_for_amber_approval(
+        signer_credential: String,
+        relays: Vec<String>,
+        amber_debug: UseStateHandle<Vec<String>>,
+    ) -> Result<String, String> {
+        let Some((uri_part, _app_key)) = signer_credential.split_once("::appkey=") else {
+            return Ok(signer_credential);
+        };
+
+        if !uri_part.starts_with("nostrconnect://") {
+            return Ok(signer_credential);
+        }
+
+        for attempt in 0..AMBER_APPROVAL_POLL_ATTEMPTS {
+            if attempt == 0 || attempt % 5 == 4 {
+                push_amber_debug(
+                    amber_debug.clone(),
+                    format!(
+                        "Amber: approval poll {}/{}",
+                        attempt + 1,
+                        AMBER_APPROVAL_POLL_ATTEMPTS
+                    ),
+                );
+            }
+            let next = amber_credential_with_replayed_connect(
+                signer_credential.clone(),
+                relays.clone(),
+                amber_debug.clone(),
+            )
+            .await?;
+            if next != signer_credential {
+                push_amber_debug(
+                    amber_debug.clone(),
+                    "Amber: approval response found".to_string(),
+                );
+                return Ok(next);
+            }
+            if attempt + 1 < AMBER_APPROVAL_POLL_ATTEMPTS {
+                TimeoutFuture::new(AMBER_APPROVAL_POLL_INTERVAL_MS).await;
+            }
+        }
+
+        Err("timed out waiting for Amber approval".to_string())
+    }
+
+    async fn amber_credential_with_replayed_connect(
+        signer_credential: String,
+        relays: Vec<String>,
+        amber_debug: UseStateHandle<Vec<String>>,
+    ) -> Result<String, String> {
+        let base_credential = signer_credential
+            .strip_suffix(PREAPPROVED_NIP46_MARKER)
+            .unwrap_or(&signer_credential);
+        let Some((uri_part, app_key)) = base_credential.split_once("::appkey=") else {
+            return Ok(signer_credential);
+        };
+
+        if !uri_part.starts_with("nostrconnect://") {
+            return Ok(signer_credential);
+        }
+
+        let uri = NostrConnectURI::parse(uri_part).map_err(|err| err.to_string())?;
+        let app_keys = Keys::parse(app_key).map_err(|err| err.to_string())?;
+        let expected_secret = nostr_connect_query_param(uri_part, "secret");
+        let Some((remote_signer_public_key, secret)) =
+            find_replayed_amber_connect(&app_keys, relays, expected_secret, amber_debug.clone())
+                .await?
+        else {
+            return Ok(signer_credential);
+        };
+
+        let relay_urls = uri.relays().to_vec();
+        let bunker_uri = NostrConnectURI::Bunker {
+            remote_signer_public_key,
+            relays: relay_urls,
+            secret,
+        };
+
+        Ok(format!(
+            "{bunker_uri}::appkey={app_key}{PREAPPROVED_NIP46_MARKER}"
+        ))
+    }
+
+    async fn find_replayed_amber_connect(
+        app_keys: &Keys,
+        relays: Vec<String>,
+        expected_secret: Option<String>,
+        amber_debug: UseStateHandle<Vec<String>>,
+    ) -> Result<Option<(nostr_sdk::prelude::PublicKey, Option<String>)>, String> {
+        let client = Client::default();
+        let relays = sanitize_relays(relays);
+        push_amber_debug(
+            amber_debug.clone(),
+            format!(
+                "Amber: checking {} relay(s) for NIP-46 events",
+                relays.len()
+            ),
+        );
+        for relay in &relays {
+            client
+                .add_relay(relay)
+                .await
+                .map_err(|err| err.to_string())?;
+        }
+
+        client.connect().await;
+        client
+            .wait_for_connection(std::time::Duration::from_secs(5))
+            .await;
+        push_amber_debug(
+            amber_debug.clone(),
+            "Amber: relay check connected; fetching NIP-46 events".to_string(),
+        );
+
+        let filter = Filter::new()
+            .kind(Kind::NostrConnect)
+            .pubkey(app_keys.public_key())
+            .limit(20);
+        let events = client
+            .fetch_events(filter, std::time::Duration::from_secs(8))
+            .await
+            .map_err(|err| err.to_string())?;
+        push_amber_debug(
+            amber_debug.clone(),
+            format!("Amber: fetched {} possible approval event(s)", events.len()),
+        );
+
+        let mut decrypted = 0usize;
+        let mut parsed = 0usize;
+        for event in events.iter() {
+            let Ok(message) =
+                nip44::decrypt(app_keys.secret_key(), &event.pubkey, event.content.as_str())
+            else {
+                continue;
+            };
+            decrypted += 1;
+            let Ok(message) = NostrConnectMessage::from_json(message) else {
+                continue;
+            };
+            parsed += 1;
+
+            let request_id = message.id().to_string();
+            let should_ack = message.is_request();
+            if let Some((remote_signer_public_key, secret)) =
+                amber_connect_approval_signer(message, event.pubkey, expected_secret.as_deref())
+            {
+                push_amber_debug(
+                    amber_debug.clone(),
+                    format!(
+                        "Amber: matched approval event; request_ack={should_ack}, secret={}",
+                        secret.is_some()
+                    ),
+                );
+                if should_ack {
+                    let response = NostrConnectMessage::response(
+                        request_id,
+                        NostrConnectResponse::with_result(
+                            nostr_sdk::nips::nip46::ResponseResult::Ack,
+                        ),
+                    );
+                    if let Ok(event) =
+                        EventBuilder::nostr_connect(app_keys, remote_signer_public_key, response)
+                            .and_then(|builder| builder.sign_with_keys(app_keys))
+                    {
+                        let _ = client.send_event_to(relays.clone(), &event).await;
+                        push_amber_debug(
+                            amber_debug.clone(),
+                            "Amber: sent ACK for signer connect request".to_string(),
+                        );
+                    }
+                }
+                client.shutdown().await;
+                return Ok(Some((remote_signer_public_key, secret)));
+            }
+        }
+
+        push_amber_debug(
+            amber_debug.clone(),
+            format!("Amber: no approval matched; decrypted {decrypted}, parsed {parsed}"),
+        );
+        client.shutdown().await;
+        Ok(None)
+    }
+
+    fn amber_connect_approval_signer(
+        message: NostrConnectMessage,
+        signer_public_key: nostr_sdk::prelude::PublicKey,
+        expected_secret: Option<&str>,
+    ) -> Option<(nostr_sdk::prelude::PublicKey, Option<String>)> {
+        match message {
+            NostrConnectMessage::Response {
+                result: Some(result),
+                error: None,
+                ..
+            } if result == "ack" => Some((signer_public_key, None)),
+            NostrConnectMessage::Response {
+                result: Some(result),
+                error: None,
+                ..
+            } if expected_secret == Some(result.as_str()) => {
+                Some((signer_public_key, Some(result)))
+            }
+            NostrConnectMessage::Request { method, params, .. } => {
+                match NostrConnectRequest::from_message(method, params) {
+                    Ok(NostrConnectRequest::Connect {
+                        remote_signer_public_key,
+                        secret,
+                    }) if remote_signer_public_key == signer_public_key => {
+                        Some((signer_public_key, secret))
+                    }
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
+    fn nostr_connect_query_param(uri: &str, key: &str) -> Option<String> {
+        let query = uri.split_once('?')?.1;
+        for pair in query.split('&') {
+            if let Some((candidate, value)) = pair.split_once('=') {
+                if candidate == key {
+                    return Some(value.to_string());
+                }
+            }
+        }
+        None
     }
 
     fn spawn_sync(
@@ -2734,7 +3238,7 @@ button:disabled { cursor: not-allowed; }
             if *sync_in_flight_timeout {
                 *timeout_flag.borrow_mut() = true;
                 sync_state_timeout.set(SyncState::Error(
-                    "sync timeout: approve in Amber, then tap Refresh".to_string(),
+                    "sync timeout: approve in Amber, then tap Sync".to_string(),
                 ));
                 sync_in_flight_timeout.set(false);
             }
@@ -2823,8 +3327,72 @@ button:disabled { cursor: not-allowed; }
     fn save_entries(entries: &[PasswordEntry]) {
         if let Some(storage) = local_storage() {
             if let Ok(payload) = serde_json::to_string(entries) {
-                let _ = storage.set_item(STORAGE_KEY, &payload);
+                let key = current_storage_key();
+                let _ = storage.set_item(key.as_str(), &payload);
             }
+        }
+    }
+
+    fn load_entries() -> Vec<PasswordEntry> {
+        let Some(storage) = local_storage() else {
+            return Vec::new();
+        };
+        let key = current_storage_key();
+        let parsed = storage
+            .get_item(key.as_str())
+            .ok()
+            .flatten()
+            .and_then(|raw| serde_json::from_str::<Vec<PasswordEntry>>(&raw).ok());
+
+        let parsed = if let Some(parsed) = parsed {
+            parsed
+        } else if key != STORAGE_KEY {
+            let legacy = storage
+                .get_item(STORAGE_KEY)
+                .ok()
+                .flatten()
+                .and_then(|raw| serde_json::from_str::<Vec<PasswordEntry>>(&raw).ok())
+                .unwrap_or_default();
+            if !legacy.is_empty() {
+                if let Ok(payload) = serde_json::to_string(&legacy) {
+                    let _ = storage.set_item(key.as_str(), &payload);
+                }
+                let _ = storage.remove_item(STORAGE_KEY);
+            }
+            legacy
+        } else {
+            Vec::new()
+        };
+
+        from_map(to_map(&parsed))
+    }
+
+    fn set_active_npub_storage(npub: Option<&str>) {
+        let Some(storage) = local_storage() else {
+            return;
+        };
+        if let Some(npub) = npub {
+            let _ = storage.set_item(ACTIVE_NPUB_STORAGE_KEY, npub);
+        } else {
+            let _ = storage.remove_item(ACTIVE_NPUB_STORAGE_KEY);
+        }
+    }
+
+    fn current_storage_key() -> String {
+        let Some(storage) = local_storage() else {
+            return STORAGE_KEY.to_string();
+        };
+        let Ok(active) = storage.get_item(ACTIVE_NPUB_STORAGE_KEY) else {
+            return STORAGE_KEY.to_string();
+        };
+        let Some(active) = active else {
+            return STORAGE_KEY.to_string();
+        };
+        let active = active.trim();
+        if active.is_empty() {
+            STORAGE_KEY.to_string()
+        } else {
+            format!("{STORAGE_KEY}::{active}")
         }
     }
 
@@ -2896,6 +3464,15 @@ button:disabled { cursor: not-allowed; }
             .collect()
     }
 
+    fn merge_entry_lists(left: &[PasswordEntry], right: &[PasswordEntry]) -> Vec<PasswordEntry> {
+        let mut merged = to_map(left);
+        for entry in right {
+            let entry = PasswordEntry::merge_prefer_newer(merged.get(&entry.id), entry.clone());
+            merged.insert(entry.id.clone(), entry);
+        }
+        from_map(merged)
+    }
+
     fn from_map(map: HashMap<String, PasswordEntry>) -> Vec<PasswordEntry> {
         let mut entries: Vec<PasswordEntry> = map.into_values().collect();
         entries.sort_by(|a, b| {
@@ -2916,3 +3493,5 @@ button:disabled { cursor: not-allowed; }
 fn main() {
     web::run();
 }
+
+// probe

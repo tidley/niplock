@@ -1242,11 +1242,13 @@ checksum = "f0efe882e02d206d8d279c20eb40e03baf7cb5136a1476dc084a324fbc3ec42d"
 
 [[package]]
 name = "niplock"
-version = "0.2.0"
+version = "0.2.21"
 dependencies = [
  "anyhow",
+ "async-utility",
  "chrono",
  "dirs",
+ "futures-util",
  "gloo-events 0.2.0",
  "gloo-timers 0.3.0",
  "js-sys",
