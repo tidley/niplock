@@ -1,6 +1,6 @@
 [package]
 name = "niplock"
-version = "0.2.21"
+version = "0.2.24"
 edition = "2024"
 
 [dependencies]

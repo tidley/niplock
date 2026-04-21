@@ -15,7 +15,7 @@ mod web {
     use gloo_timers::future::TimeoutFuture;
     use js_sys::{Date, Math};
     use niplock::model::PasswordEntry;
-    use niplock::nostr_sync::{NostrSync, signer_from_input};
+    use niplock::nostr_sync::{DEFAULT_RELAY_COPY_TARGET, NostrSync, signer_from_input};
     use nostr_sdk::JsonUtil;
     use nostr_sdk::prelude::{
         Client, EventBuilder, Filter, Keys, Kind, NostrConnectMessage, NostrConnectRequest,
@@ -29,6 +29,7 @@ mod web {
     const STORAGE_KEY: &str = "niplock.vault.v1";
     const ACTIVE_NPUB_STORAGE_KEY: &str = "niplock.active_npub.v1";
     const RELAYS_STORAGE_KEY: &str = "niplock.relays.v1";
+    const RELAY_COPY_TARGET_STORAGE_KEY: &str = "niplock.relay_copy_target.v1";
     const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
     const MAX_SYNC_RELAYS: usize = 6;
     const AMBER_NIP46_PERMS: &str = "get_public_key,sign_event,nip44_encrypt,nip44_decrypt";
@@ -454,13 +455,15 @@ button:disabled { cursor: not-allowed; }
   .unlock { padding: 8px 9px; }
 }
 @media (max-width: 700px) {
-  .table th:nth-child(4), .table td:nth-child(4) { display: none; }
+  .table-passwords .col-strength, .table-passwords .col-updated { display: none; }
   .table th, .table td { padding: 8px 6px; font-size: 0.9rem; }
   .table th { font-size: 0.62rem; }
-  .top { padding: 0 8px; }
-  .search { padding: 8px 10px; font-size: 0.85rem; }
-  .btn { padding: 7px 8px; font-size: 0.78rem; }
-  .unlock { font-size: 0.68rem; padding: 7px 8px; }
+  .top { min-height: 72px; height: auto; padding: 10px 10px; gap: 10px; }
+  .top-right { gap: 8px; }
+  .menu-btn { padding: 11px 13px; font-size: 1.08rem; }
+  .search { padding: 11px 12px; font-size: 0.96rem; min-height: 44px; }
+  .btn { padding: 10px 11px; font-size: 0.9rem; min-height: 44px; }
+  .unlock { font-size: 0.8rem; padding: 10px 11px; min-height: 44px; }
   .page { padding: 12px; }
   .detail-sub { font-size: 0.75rem; gap: 8px; }
   .row { flex-wrap: wrap; }
@@ -544,8 +547,10 @@ button:disabled { cursor: not-allowed; }
         let mobile_menu_open = use_state(|| false);
 
         let sync_state = use_state(|| SyncState::Idle);
+        let sync_detail = use_state(|| None::<String>);
         let last_sync = use_state(|| None::<String>);
         let sync_in_flight = use_state(|| false);
+        let relay_copies_by_entry = use_state(HashMap::<String, usize>::new);
         let live_sync = use_mut_ref(|| None::<NostrSync>);
         let live_subscription_id = use_mut_ref(|| None::<nostr_sdk::prelude::SubscriptionId>);
         let live_listener_running = use_mut_ref(|| false);
@@ -555,6 +560,7 @@ button:disabled { cursor: not-allowed; }
             let relays = (*relays).clone();
             move || default_relay_probes(&relays)
         });
+        let relay_copy_target = use_state(load_relay_copy_target);
         let last_relay_probe_at = use_state(|| None::<f64>);
         let relay_input = use_state(String::new);
         let relay_error = use_state(|| None::<String>);
@@ -569,12 +575,14 @@ button:disabled { cursor: not-allowed; }
         // Keep UI status consistent with actual in-flight sync activity.
         {
             let sync_state = sync_state.clone();
+            let sync_detail = sync_detail.clone();
             let sync_in_flight = sync_in_flight.clone();
             use_effect_with(
                 (*sync_in_flight, (*sync_state).clone()),
                 move |(in_flight, state)| {
                     if !*in_flight && matches!(state, SyncState::Syncing) {
                         sync_state.set(SyncState::Idle);
+                        sync_detail.set(None);
                     }
                     || ()
                 },
@@ -622,8 +630,11 @@ button:disabled { cursor: not-allowed; }
             let entries = entries.clone();
             let signer_credential = signer_credential.clone();
             let sync_state = sync_state.clone();
+            let sync_detail = sync_detail.clone();
             let last_sync = last_sync.clone();
             let sync_in_flight = sync_in_flight.clone();
+            let relay_copies_by_entry = relay_copies_by_entry.clone();
+            let relay_copy_target = relay_copy_target.clone();
             let live_sync = live_sync.clone();
             let unlocked = unlocked.clone();
             let relays = relays.clone();
@@ -632,8 +643,11 @@ button:disabled { cursor: not-allowed; }
                     let entries = entries.clone();
                     let signer_credential = signer_credential.clone();
                     let sync_state = sync_state.clone();
+                    let sync_detail = sync_detail.clone();
                     let last_sync = last_sync.clone();
                     let sync_in_flight = sync_in_flight.clone();
+                    let relay_copies_by_entry = relay_copies_by_entry.clone();
+                    let relay_copy_target = relay_copy_target.clone();
                     let live_sync = live_sync.clone();
                     let unlocked = unlocked.clone();
                     let relays = relays.clone();
@@ -647,8 +661,11 @@ button:disabled { cursor: not-allowed; }
                                         (*relays).clone(),
                                         entries.clone(),
                                         sync_state.clone(),
+                                        sync_detail.clone(),
                                         last_sync.clone(),
                                         sync_in_flight.clone(),
+                                        relay_copies_by_entry.clone(),
+                                        *relay_copy_target,
                                         live_sync.clone(),
                                     );
                                 }
@@ -661,8 +678,11 @@ button:disabled { cursor: not-allowed; }
                     let entries = entries.clone();
                     let signer_credential = signer_credential.clone();
                     let sync_state = sync_state.clone();
+                    let sync_detail = sync_detail.clone();
                     let last_sync = last_sync.clone();
                     let sync_in_flight = sync_in_flight.clone();
+                    let relay_copies_by_entry = relay_copies_by_entry.clone();
+                    let relay_copy_target = relay_copy_target.clone();
                     let live_sync = live_sync.clone();
                     let unlocked = unlocked.clone();
                     let relays = relays.clone();
@@ -674,8 +694,11 @@ button:disabled { cursor: not-allowed; }
                                 (*relays).clone(),
                                 entries.clone(),
                                 sync_state.clone(),
+                                sync_detail.clone(),
                                 last_sync.clone(),
                                 sync_in_flight.clone(),
+                                relay_copies_by_entry.clone(),
+                                *relay_copy_target,
                                 live_sync.clone(),
                             );
                         }
@@ -875,6 +898,9 @@ button:disabled { cursor: not-allowed; }
             let selected_id = selected_id.clone();
             let editor_open = editor_open.clone();
             let sync_state = sync_state.clone();
+            let sync_detail = sync_detail.clone();
+            let relay_copies_by_entry = relay_copies_by_entry.clone();
+            let relay_copy_target = relay_copy_target.clone();
             let live_sync = live_sync.clone();
             let live_subscription_id = live_subscription_id.clone();
             let live_listener_running = live_listener_running.clone();
@@ -883,9 +909,11 @@ button:disabled { cursor: not-allowed; }
                 if *unlocked {
                     let live_sync = live_sync.clone();
                     let sync_state = sync_state.clone();
+                    let sync_detail_async = sync_detail.clone();
                     let signer_credential = (*signer_credential).clone();
                     let current_entries = (*entries).clone();
                     let relays = (*relays).clone();
+                    let relay_copy_target = *relay_copy_target;
                     spawn_local(async move {
                         let mut sync = live_sync.borrow_mut().take();
                         if sync.is_none() {
@@ -895,6 +923,7 @@ button:disabled { cursor: not-allowed; }
                                     sync_state.set(SyncState::Error(
                                         "lock sync: invalid signer".to_string(),
                                     ));
+                                    sync_detail_async.set(None);
                                     return;
                                 }
                             };
@@ -904,6 +933,7 @@ button:disabled { cursor: not-allowed; }
                                     sync_state.set(SyncState::Error(
                                         "lock sync: relay connect failed".to_string(),
                                     ));
+                                    sync_detail_async.set(None);
                                     return;
                                 }
                             };
@@ -911,19 +941,25 @@ button:disabled { cursor: not-allowed; }
 
                         if let Some(sync) = sync {
                             let local = to_map(&current_entries);
-                            match sync.sync(&local).await {
+                            match sync
+                                .sync_with_progress_target(&local, relay_copy_target, |_| {})
+                                .await
+                            {
                                 Ok((merged, _summary)) => {
                                     save_entries(&from_map(merged));
                                     sync_state.set(SyncState::Idle);
+                                    sync_detail_async.set(None);
                                 }
                                 Err(_) => {
                                     sync_state
                                         .set(SyncState::Error("lock sync failed".to_string()));
+                                    sync_detail_async.set(None);
                                 }
                             }
                             sync.shutdown().await;
                         } else {
                             sync_state.set(SyncState::Idle);
+                            sync_detail_async.set(None);
                         }
                     });
 
@@ -934,6 +970,8 @@ button:disabled { cursor: not-allowed; }
                     amber_uri.set(None);
                     amber_session_credential.set(None);
                     amber_debug.set(Vec::new());
+                    sync_detail.set(None);
+                    relay_copies_by_entry.set(HashMap::new());
                     set_active_npub_storage(None);
                     entries.set(vec![]);
                     selected_id.set(None);
@@ -967,8 +1005,11 @@ button:disabled { cursor: not-allowed; }
             let unlock_panel_open = unlock_panel_open.clone();
             let entries = entries.clone();
             let sync_state = sync_state.clone();
+            let sync_detail = sync_detail.clone();
             let last_sync = last_sync.clone();
             let sync_in_flight = sync_in_flight.clone();
+            let relay_copies_by_entry = relay_copies_by_entry.clone();
+            let relay_copy_target = relay_copy_target.clone();
             let live_sync = live_sync.clone();
             Callback::from(move |_| {
                 unlock_method.set(UnlockMethod::Amber);
@@ -1022,8 +1063,11 @@ button:disabled { cursor: not-allowed; }
                         unlock_error.clone(),
                         unlock_panel_open.clone(),
                         sync_state.clone(),
+                        sync_detail.clone(),
                         last_sync.clone(),
                         sync_in_flight.clone(),
+                        relay_copies_by_entry.clone(),
+                        *relay_copy_target,
                         live_sync.clone(),
                         amber_debug.clone(),
                     );
@@ -1060,8 +1104,11 @@ button:disabled { cursor: not-allowed; }
             let unlock_panel_open = unlock_panel_open.clone();
             let entries = entries.clone();
             let sync_state = sync_state.clone();
+            let sync_detail = sync_detail.clone();
             let last_sync = last_sync.clone();
             let sync_in_flight = sync_in_flight.clone();
+            let relay_copies_by_entry = relay_copies_by_entry.clone();
+            let relay_copy_target = relay_copy_target.clone();
             let live_sync = live_sync.clone();
             let relays = relays.clone();
             Callback::from(move |_| {
@@ -1091,8 +1138,11 @@ button:disabled { cursor: not-allowed; }
                                 unlock_error.clone(),
                                 unlock_panel_open.clone(),
                                 sync_state.clone(),
+                                sync_detail.clone(),
                                 last_sync.clone(),
                                 sync_in_flight.clone(),
+                                relay_copies_by_entry.clone(),
+                                *relay_copy_target,
                                 live_sync.clone(),
                                 amber_debug.clone(),
                             );
@@ -1126,8 +1176,11 @@ button:disabled { cursor: not-allowed; }
                                 unlock_error.clone(),
                                 unlock_panel_open.clone(),
                                 sync_state.clone(),
+                                sync_detail.clone(),
                                 last_sync.clone(),
                                 sync_in_flight.clone(),
+                                relay_copies_by_entry.clone(),
+                                *relay_copy_target,
                                 live_sync.clone(),
                                 amber_debug.clone(),
                             );
@@ -1155,8 +1208,11 @@ button:disabled { cursor: not-allowed; }
                         let unlock_error_state = unlock_error.clone();
                         let unlock_panel_open_state = unlock_panel_open.clone();
                         let sync_state_state = sync_state.clone();
+                        let sync_detail_state = sync_detail.clone();
                         let last_sync_state = last_sync.clone();
                         let sync_in_flight_state = sync_in_flight.clone();
+                        let relay_copies_by_entry_state = relay_copies_by_entry.clone();
+                        let relay_copy_target_state = *relay_copy_target;
                         let live_sync_state = live_sync.clone();
                         spawn_local(async move {
                             let next_npub = match signer.get_public_key().await {
@@ -1179,8 +1235,11 @@ button:disabled { cursor: not-allowed; }
                                 relays_for_sync,
                                 entries_state.clone(),
                                 sync_state_state,
+                                sync_detail_state,
                                 last_sync_state,
                                 sync_in_flight_state,
+                                relay_copies_by_entry_state,
+                                relay_copy_target_state,
                                 live_sync_state,
                             );
                         });
@@ -1196,8 +1255,11 @@ button:disabled { cursor: not-allowed; }
             let signer_credential = signer_credential.clone();
             let entries = entries.clone();
             let sync_state = sync_state.clone();
+            let sync_detail = sync_detail.clone();
             let last_sync = last_sync.clone();
             let sync_in_flight = sync_in_flight.clone();
+            let relay_copies_by_entry = relay_copies_by_entry.clone();
+            let relay_copy_target = relay_copy_target.clone();
             let live_sync = live_sync.clone();
             let unlocked = unlocked.clone();
             let relays = relays.clone();
@@ -1209,8 +1271,11 @@ button:disabled { cursor: not-allowed; }
                         (*relays).clone(),
                         entries.clone(),
                         sync_state.clone(),
+                        sync_detail.clone(),
                         last_sync.clone(),
                         sync_in_flight.clone(),
+                        relay_copies_by_entry.clone(),
+                        *relay_copy_target,
                         live_sync.clone(),
                     );
                 }
@@ -1240,8 +1305,11 @@ button:disabled { cursor: not-allowed; }
             let signer_credential = signer_credential.clone();
             let entries = entries.clone();
             let sync_state = sync_state.clone();
+            let sync_detail = sync_detail.clone();
             let last_sync = last_sync.clone();
             let sync_in_flight = sync_in_flight.clone();
+            let relay_copies_by_entry = relay_copies_by_entry.clone();
+            let relay_copy_target = relay_copy_target.clone();
             let live_sync = live_sync.clone();
             let unlocked = unlocked.clone();
             let relays = relays.clone();
@@ -1253,8 +1321,11 @@ button:disabled { cursor: not-allowed; }
                         (*relays).clone(),
                         entries.clone(),
                         sync_state.clone(),
+                        sync_detail.clone(),
                         last_sync.clone(),
                         sync_in_flight.clone(),
+                        relay_copies_by_entry.clone(),
+                        *relay_copy_target,
                         live_sync.clone(),
                     );
                 }
@@ -1268,6 +1339,22 @@ button:disabled { cursor: not-allowed; }
                 let input: HtmlInputElement = e.target_unchecked_into();
                 relay_input.set(input.value());
                 relay_error.set(None);
+            })
+        };
+
+        let on_relay_copy_target = {
+            let relay_copy_target = relay_copy_target.clone();
+            Callback::from(move |e: InputEvent| {
+                let input: HtmlInputElement = e.target_unchecked_into();
+                let parsed = input
+                    .value()
+                    .trim()
+                    .parse::<usize>()
+                    .ok()
+                    .map(sanitize_relay_copy_target)
+                    .unwrap_or(DEFAULT_RELAY_COPY_TARGET);
+                save_relay_copy_target(parsed);
+                relay_copy_target.set(parsed);
             })
         };
 
@@ -1585,7 +1672,7 @@ button:disabled { cursor: not-allowed; }
 
         let sync_label = match &*sync_state {
             SyncState::Idle => "Idle".to_string(),
-            SyncState::Syncing => "Syncing".to_string(),
+            SyncState::Syncing => format_sync_label("Syncing", (*sync_detail).clone()),
             SyncState::Error(err) => format!("Error: {err}"),
         };
 
@@ -1598,6 +1685,28 @@ button:disabled { cursor: not-allowed; }
         } else {
             ((entries.len() - weak_count) as f64 / entries.len() as f64) * 100.0
         };
+        let on_open_entry_from_audit = {
+            let page = page.clone();
+            let selected_id = selected_id.clone();
+            let draft = draft.clone();
+            let editor_open = editor_open.clone();
+            let show_secret = show_secret.clone();
+            let mobile_menu_open = mobile_menu_open.clone();
+            Callback::from(move |entry: PasswordEntry| {
+                page.set(Page::Vault);
+                selected_id.set(Some(entry.id.clone()));
+                draft.set(Draft {
+                    id: Some(entry.id),
+                    service: entry.service,
+                    username: entry.username,
+                    secret: entry.secret,
+                    notes: entry.notes.unwrap_or_default(),
+                });
+                show_secret.set(false);
+                editor_open.set(true);
+                mobile_menu_open.set(false);
+            })
+        };
 
         html! {
             <>
@@ -1606,9 +1715,9 @@ button:disabled { cursor: not-allowed; }
                 <div class="app">
                     <aside class={classes!("sidebar", if *mobile_menu_open { Some("mobile-open") } else { None })}>
                         <div class="brand">
-                            <h1>{"niplock"}</h1>
+                            <h1 onclick={on_nav_vault.clone()} style="cursor:pointer;">{"niplock"}</h1>
                         </div>
-                        <button class={classes!("nav-item", if *page == Page::Vault { Some("active") } else { None })} onclick={on_nav_vault}>{"Vault"}</button>
+                        <button class={classes!("nav-item", if *page == Page::Vault { Some("active") } else { None })} onclick={on_nav_vault}>{"Passwords"}</button>
                         <button class={classes!("nav-item", if *page == Page::Generator { Some("active") } else { None })} onclick={on_nav_generator}>{"Generator"}</button>
                         <button class={classes!("nav-item", if *page == Page::SecurityAudit { Some("active") } else { None })} onclick={on_nav_audit}>{"Security Audit"}</button>
                         <button class={classes!("nav-item", if *page == Page::Settings { Some("active") } else { None })} onclick={on_nav_settings}>{"Settings"}</button>
@@ -1622,7 +1731,7 @@ button:disabled { cursor: not-allowed; }
                     <section class="main">
                         <header class="top">
                             <button class="menu-btn" onclick={on_toggle_mobile_menu}>{"☰"}</button>
-                            <input class="search" placeholder="Search vault..." value={(*search).clone()} oninput={on_search} />
+                            <input class="search" placeholder="Search passwords..." value={(*search).clone()} oninput={on_search} />
                             <div class="top-right">
                                 <button class="btn" onclick={on_sync_now.clone()} disabled={!*unlocked}>{"Sync"}</button>
                                 <button class="unlock" onclick={on_toggle_unlock_panel}>{ if *unlocked { "Lock" } else { "Unlock" } }</button>
@@ -1718,6 +1827,8 @@ button:disabled { cursor: not-allowed; }
                                         editor_open.clone(),
                                         show_secret.clone(),
                                         entries.clone(),
+                                        (*relay_copies_by_entry).clone(),
+                                        *relay_copy_target,
                                         copy_notice.clone(),
                                         on_entries_modified.clone(),
                                     ),
@@ -1758,18 +1869,28 @@ button:disabled { cursor: not-allowed; }
                                         on_generate,
                                         on_copy_generated,
                                     ),
-                                    Page::SecurityAudit => render_audit_page(&entries, weak_count, health_score),
+                                    Page::SecurityAudit => render_audit_page(
+                                        &entries,
+                                        weak_count,
+                                        health_score,
+                                        (*relay_copies_by_entry).clone(),
+                                        *relay_copy_target,
+                                        on_open_entry_from_audit.clone(),
+                                    ),
                                     Page::Settings => render_settings_page(
                                         (*signer_credential).clone(),
                                         (*active_npub).clone(),
                                         *unlocked,
                                         sync_label,
+                                        (*sync_detail).clone(),
                                         last_sync.as_ref().cloned(),
                                         (*relays).clone(),
+                                        *relay_copy_target,
                                         (*relay_input).clone(),
                                         (*relay_error).clone(),
                                         (*relay_probes).clone(),
                                         on_relay_input.clone(),
+                                        on_relay_copy_target.clone(),
                                         on_add_relay.clone(),
                                         on_remove_relay.clone(),
                                         on_probe_relays.clone(),
@@ -1792,8 +1913,8 @@ button:disabled { cursor: not-allowed; }
         draft: &UseStateHandle<Draft>,
         show_secret: bool,
         detail_secret_visible: bool,
-        health_score: f64,
-        last_sync: Option<String>,
+        _health_score: f64,
+        _last_sync: Option<String>,
         _weak_count: usize,
         generated: String,
         gen_len: usize,
@@ -1822,6 +1943,8 @@ button:disabled { cursor: not-allowed; }
         editor_open_state: UseStateHandle<bool>,
         show_secret_state: UseStateHandle<bool>,
         entries_state: UseStateHandle<Vec<PasswordEntry>>,
+        relay_copies_by_entry: HashMap<String, usize>,
+        relay_copy_target: usize,
         copy_notice: UseStateHandle<Option<String>>,
         on_entries_modified: Callback<Vec<PasswordEntry>>,
     ) -> Html {
@@ -1895,8 +2018,8 @@ button:disabled { cursor: not-allowed; }
             html! {
                 <>
                     <div class="row muted" style="margin-bottom: 10px;">
-                        <button class="btn" onclick={on_back}>{"← Back to Vault"}</button>
-                        <span>{format!("Vault / {}", entry.service)}</span>
+                        <button class="btn" onclick={on_back}>{"← Back to Passwords"}</button>
+                        <span>{format!("Passwords / {}", entry.service)}</span>
                     </div>
                     <div class="detail-grid">
                         <div class="detail-main">
@@ -1970,6 +2093,9 @@ button:disabled { cursor: not-allowed; }
                             <div class="sidebar-card">
                                 <div class="detail-label">{"Metadata"}</div>
                                 <div class="muted">{format!("Last modified: {}", entry.updated_at.format("%b %d, %Y %H:%M UTC"))}</div>
+                                if let Some(copies) = relay_copies_by_entry.get(&entry.id) {
+                                    <div class="muted" style="margin-top:6px;">{format!("Relay copies: {copies}/{relay_copy_target} target")}</div>
+                                }
                                 <div class="muted" style="margin-top:6px; font-family:monospace; overflow-wrap:anywhere; word-break:break-word;">{format!("Record id: {}", entry.id)}</div>
                                 if let Some(event_id) = &entry.last_event_id {
                                     <div class="muted" style="margin-top:6px; font-family:monospace; overflow-wrap:anywhere; word-break:break-word;">{format!("Last sync event: {}", event_id)}</div>
@@ -1988,37 +2114,18 @@ button:disabled { cursor: not-allowed; }
             let generated_bits = entropy_bits(&generated);
             html! {
                 <>
-                    <div class="explorer-head">
-                        <div>
-                            <h2 style="margin:0; font-size:2.2rem; font-family:'Space Grotesk', 'Segoe UI', sans-serif;">{"Vault Explorer"}</h2>
-                        </div>
-                        <div class="stats">
-                            <div class="stat">
-                                <div class="k">{"Health Score"}</div>
-                                <div class="v" style="color: var(--teal);">{format!("{:.1}%", health_score)}</div>
-                            </div>
-                            <div class="stat">
-                                <div class="k">{"Last Sync"}</div>
-                                <div class="v" style="font-size:1.3rem;">{
-                                    last_sync
-                                        .map(|ts| format_human_timestamp(&ts))
-                                        .unwrap_or_else(|| "Never".to_string())
-                                }</div>
-                            </div>
-                        </div>
-                    </div>
-
                     <div class="section">
                         if !unlocked {
-                            <div class="muted" style="margin-bottom:10px;">{"Unlock to load your vault entries."}</div>
+                            <div class="muted" style="margin-bottom:10px;">{"Unlock to load your passwords."}</div>
                         }
-                        <table class="table">
+                        <table class="table table-passwords">
                             <thead>
                                 <tr>
                                     <th>{"Title"}</th>
                                     <th>{"Username"}</th>
-                                    <th>{"Strength"}</th>
-                                    <th>{"Last Modified"}</th>
+                                    <th class="col-strength">{"Strength"}</th>
+                                    <th class="col-relay">{"Relay Copies"}</th>
+                                    <th class="col-updated">{"Last Modified"}</th>
                                 </tr>
                             </thead>
                             <tbody>
@@ -2060,13 +2167,19 @@ button:disabled { cursor: not-allowed; }
                                     <tr onclick={on_select}>
                                         <td><strong>{entry.service.clone()}</strong></td>
                                         <td class="copy-cell" ondblclick={on_copy_user}>{entry.username.clone()}</td>
-                                        <td>
+                                        <td class="col-strength">
                                             <div class="row">
                                                 <span class="strength"><i style={format!("width:{}%;", strength_width_pct(bits))}></i></span>
                                                 <span class="muted strength-text">{strength_label(bits)}</span>
                                             </div>
                                         </td>
-                                        <td class="copy-cell" ondblclick={on_copy_secret}>{entry.updated_at.format("%b %d, %Y").to_string()}</td>
+                                        <td class="col-relay">{
+                                            relay_copies_by_entry
+                                                .get(&entry.id)
+                                                .map(|copies| format!("{copies}/{relay_copy_target}"))
+                                                .unwrap_or_else(|| "?".to_string())
+                                        }</td>
+                                        <td class={classes!("copy-cell", "col-updated")} ondblclick={on_copy_secret}>{entry.updated_at.format("%b %d, %Y").to_string()}</td>
                                     </tr>
                                 }
                             })}
@@ -2226,7 +2339,14 @@ button:disabled { cursor: not-allowed; }
         }
     }
 
-    fn render_audit_page(entries: &[PasswordEntry], weak_count: usize, health_score: f64) -> Html {
+    fn render_audit_page(
+        entries: &[PasswordEntry],
+        weak_count: usize,
+        health_score: f64,
+        relay_copies_by_entry: HashMap<String, usize>,
+        relay_copy_target: usize,
+        on_open_entry: Callback<PasswordEntry>,
+    ) -> Html {
         let mut ranked = entries.to_vec();
         ranked.sort_by(|a, b| {
             entropy_bits(&a.secret)
@@ -2258,20 +2378,26 @@ button:disabled { cursor: not-allowed; }
                                 <th>{"Title"}</th>
                                 <th>{"Username"}</th>
                                 <th>{"Entropy"}</th>
-                                <th>{"Action"}</th>
+                                <th>{"Relay Copies"}</th>
                             </tr>
                         </thead>
                         <tbody>
                         {for ranked.iter().take(12).map(|entry| {
                             let bits = entropy_bits(&entry.secret);
+                            let entry_for_open = entry.clone();
+                            let on_open_entry = on_open_entry.clone();
+                            let on_select = Callback::from(move |_| on_open_entry.emit(entry_for_open.clone()));
                             html! {
-                                <tr>
+                                <tr onclick={on_select}>
                                     <td>{entry.service.clone()}</td>
                                     <td>{entry.username.clone()}</td>
                                     <td>{format!("{bits:.1} bits")}</td>
-                                    <td>
-                                        <button class="btn">{"Rotate"}</button>
-                                    </td>
+                                    <td>{
+                                        relay_copies_by_entry
+                                            .get(&entry.id)
+                                            .map(|copies| format!("{copies}/{relay_copy_target}"))
+                                            .unwrap_or_else(|| "?".to_string())
+                                    }</td>
                                 </tr>
                             }
                         })}
@@ -2287,12 +2413,15 @@ button:disabled { cursor: not-allowed; }
         active_npub: Option<String>,
         unlocked: bool,
         sync_label: String,
+        sync_detail: Option<String>,
         last_sync: Option<String>,
         relays: Vec<String>,
+        relay_copy_target: usize,
         relay_input: String,
         relay_error: Option<String>,
         relay_probes: Vec<RelayProbe>,
         on_relay_input: Callback<InputEvent>,
+        on_relay_copy_target: Callback<InputEvent>,
         on_add_relay: Callback<MouseEvent>,
         on_remove_relay: Callback<String>,
         on_probe_relays: Callback<MouseEvent>,
@@ -2339,6 +2468,9 @@ button:disabled { cursor: not-allowed; }
                     <div class="detail-label">{"Sync State"}</div>
                     <div style="font-size:1.25rem; font-weight:700; color:var(--teal);">{if unlocked { "Unlocked" } else { "Locked" }}</div>
                     <div class="muted">{sync_label}</div>
+                    if let Some(detail) = sync_detail {
+                        <div class="muted" style="margin-top:6px; font-family:monospace; font-size:0.82rem; overflow-wrap:anywhere;">{detail}</div>
+                    }
                 </div>
 
                 <div class="section" style="margin-top:12px;">
@@ -2354,7 +2486,7 @@ button:disabled { cursor: not-allowed; }
                         {if signer_credential.is_empty() { "(not loaded)".to_string() } else { "signer••••••••••••••••".to_string() }}
                     </div>
                     if let Some(ts) = last_sync {
-                        <div class="muted" style="margin-top:8px;">{format!("Last sync: {}", format_human_timestamp(&ts))}</div>
+                        <div class="muted" style="margin-top:6px; font-size:0.76rem; opacity:0.85;">{format!("Last sync: {}", format_human_timestamp(&ts))}</div>
                     }
                 </div>
 
@@ -2378,6 +2510,18 @@ button:disabled { cursor: not-allowed; }
                         } else {
                             "Relay health is checked only when you press Recheck Relays.".to_string()
                         }}
+                    </div>
+                    <div style="margin-top:10px;" class="detail-label">{"Relay Copy Target"}</div>
+                    <div class="muted" style="margin-top:4px;">{"Minimum relays that should hold each password entry."}</div>
+                    <div class="row" style="margin-top:6px;">
+                        <input
+                            class="input"
+                            type="number"
+                            min="1"
+                            max={MAX_SYNC_RELAYS.to_string()}
+                            value={relay_copy_target.to_string()}
+                            oninput={on_relay_copy_target}
+                        />
                     </div>
                     <div style="margin-top:10px;" class="detail-label">{"Configured Relays"}</div>
                     <div class="muted" style="margin-top:4px;">{format!("NIP-17 DM sync uses up to {MAX_SYNC_RELAYS} relays.")}</div>
@@ -2435,6 +2579,18 @@ button:disabled { cursor: not-allowed; }
             "Moderate"
         } else {
             "Weak"
+        }
+    }
+
+    fn format_sync_label(base: &str, detail: Option<String>) -> String {
+        if let Some(detail) = detail {
+            if detail.is_empty() {
+                base.to_string()
+            } else {
+                format!("{base}: {detail}")
+            }
+        } else {
+            base.to_string()
         }
     }
 
@@ -2698,8 +2854,11 @@ button:disabled { cursor: not-allowed; }
         unlock_error: UseStateHandle<Option<String>>,
         unlock_panel_open: UseStateHandle<bool>,
         sync_state: UseStateHandle<SyncState>,
+        sync_detail: UseStateHandle<Option<String>>,
         last_sync: UseStateHandle<Option<String>>,
         sync_in_flight: UseStateHandle<bool>,
+        relay_copies_by_entry: UseStateHandle<HashMap<String, usize>>,
+        relay_copy_target: usize,
         live_sync: Rc<RefCell<Option<NostrSync>>>,
         amber_debug: UseStateHandle<Vec<String>>,
     ) {
@@ -2716,6 +2875,7 @@ button:disabled { cursor: not-allowed; }
 
         sync_in_flight.set(true);
         sync_state.set(SyncState::Syncing);
+        sync_detail.set(Some("Waiting for Amber approval".to_string()));
         push_amber_debug(
             amber_debug.clone(),
             format!(
@@ -2727,6 +2887,7 @@ button:disabled { cursor: not-allowed; }
         let timeout_flag = timed_out.clone();
         let sync_state_timeout = sync_state.clone();
         let sync_in_flight_timeout = sync_in_flight.clone();
+        let sync_detail_timeout = sync_detail.clone();
         let unlock_error_timeout = unlock_error.clone();
         let amber_debug_timeout = amber_debug.clone();
         let watchdog = Timeout::new(45_000, move || {
@@ -2740,6 +2901,9 @@ button:disabled { cursor: not-allowed; }
                     .set(Some("Amber sync timeout. Tap Sync to retry.".to_string()));
                 sync_state_timeout.set(SyncState::Error(
                     "Amber sync timeout. Tap Sync to retry.".to_string(),
+                ));
+                sync_detail_timeout.set(Some(
+                    "Timed out while waiting for relay/signer responses".to_string(),
                 ));
                 sync_in_flight_timeout.set(false);
             }
@@ -2769,6 +2933,7 @@ button:disabled { cursor: not-allowed; }
                     );
                     unlock_error.set(Some(format!("Amber approval failed: {err}")));
                     sync_state.set(SyncState::Error("Amber approval failed".to_string()));
+                    sync_detail.set(Some("Amber approval failed".to_string()));
                     sync_in_flight.set(false);
                     return;
                 }
@@ -2785,6 +2950,7 @@ button:disabled { cursor: not-allowed; }
                     );
                     unlock_error.set(Some(format!("Invalid Amber session: {err}")));
                     sync_state.set(SyncState::Error("Amber session failed".to_string()));
+                    sync_detail.set(Some("Amber session was rejected".to_string()));
                     sync_in_flight.set(false);
                     return;
                 }
@@ -2848,6 +3014,8 @@ button:disabled { cursor: not-allowed; }
                                         sync_state.set(SyncState::Error(
                                             "Amber approval failed".to_string(),
                                         ));
+                                        sync_detail
+                                            .set(Some("Amber approval replay failed".to_string()));
                                         sync_in_flight.set(false);
                                         return;
                                     }
@@ -2860,6 +3028,7 @@ button:disabled { cursor: not-allowed; }
                                 unlock_error.set(Some(format!("Amber approval failed: {err}")));
                                 sync_state
                                     .set(SyncState::Error("Amber approval failed".to_string()));
+                                sync_detail.set(Some("Amber approval replay failed".to_string()));
                                 sync_in_flight.set(false);
                                 return;
                             }
@@ -2870,6 +3039,7 @@ button:disabled { cursor: not-allowed; }
                             );
                             unlock_error.set(Some(format!("Amber approval failed: {err}")));
                             sync_state.set(SyncState::Error("Amber approval failed".to_string()));
+                            sync_detail.set(Some("Amber approval replay failed".to_string()));
                             sync_in_flight.set(false);
                             return;
                         }
@@ -2880,6 +3050,7 @@ button:disabled { cursor: not-allowed; }
                         );
                         unlock_error.set(Some(format!("Amber approval failed: {err}")));
                         sync_state.set(SyncState::Error("Amber approval failed".to_string()));
+                        sync_detail.set(Some("Amber approval replay lookup failed".to_string()));
                         sync_in_flight.set(false);
                         return;
                     }
@@ -2898,6 +3069,7 @@ button:disabled { cursor: not-allowed; }
             unlock_error.set(None);
 
             unlock_error.set(Some("Amber approved. Connecting relays...".to_string()));
+            sync_detail.set(Some("Connecting relays".to_string()));
             push_amber_debug(
                 amber_debug.clone(),
                 "Amber: approved; creating Nostr sync client".to_string(),
@@ -2919,12 +3091,14 @@ button:disabled { cursor: not-allowed; }
                     unlock_panel_open.set(false);
                     unlock_error.set(Some(format!("Amber connected; relay sync failed: {err}")));
                     sync_state.set(SyncState::Error("relay connect failed".to_string()));
+                    sync_detail.set(Some(format!("Relay connect failed: {err}")));
                     sync_in_flight.set(false);
                     return;
                 }
             };
 
             unlock_error.set(Some("Amber approved. Syncing vault...".to_string()));
+            sync_detail.set(Some("Downloading and merging vault entries".to_string()));
             let cached_entries = merge_entry_lists(&*entries_state, &load_entries());
             entries_state.set(cached_entries.clone());
             let local = to_map(&cached_entries);
@@ -2933,13 +3107,15 @@ button:disabled { cursor: not-allowed; }
                 format!("Amber: syncing vault with {} local entries", local.len()),
             );
             let amber_debug_progress = amber_debug.clone();
+            let sync_detail_progress = sync_detail.clone();
             match sync
-                .sync_with_progress(&local, move |message| {
+                .sync_with_progress_target(&local, relay_copy_target, move |message| {
+                    sync_detail_progress.set(Some(message.clone()));
                     push_amber_debug(amber_debug_progress.clone(), message);
                 })
                 .await
             {
-                Ok((merged, _summary)) => {
+                Ok((merged, summary)) => {
                     if *timed_out.borrow() {
                         push_amber_debug(
                             amber_debug.clone(),
@@ -2954,6 +3130,7 @@ button:disabled { cursor: not-allowed; }
                     let next = from_map(merged);
                     save_entries(&next);
                     entries_state.set(next);
+                    relay_copies_by_entry.set(summary.entry_relay_copies);
                     last_sync.set(Some(Utc::now().to_rfc3339()));
                     *live_sync.borrow_mut() = Some(sync);
                     signer_credential_state.set(signer_credential);
@@ -2962,6 +3139,7 @@ button:disabled { cursor: not-allowed; }
                     unlock_panel_open.set(false);
                     unlock_error.set(None);
                     sync_state.set(SyncState::Idle);
+                    sync_detail.set(None);
                     sync_in_flight.set(false);
                 }
                 Err(err) => {
@@ -2979,6 +3157,7 @@ button:disabled { cursor: not-allowed; }
                     unlock_panel_open.set(false);
                     unlock_error.set(Some(format!("Amber connected; sync failed: {err}")));
                     sync_state.set(SyncState::Error(format!("sync failed: {err}")));
+                    sync_detail.set(Some(format!("Sync failed: {err}")));
                     sync_in_flight.set(false);
                 }
             }
@@ -3220,8 +3399,11 @@ button:disabled { cursor: not-allowed; }
         relays: Vec<String>,
         entries_state: UseStateHandle<Vec<PasswordEntry>>,
         sync_state: UseStateHandle<SyncState>,
+        sync_detail: UseStateHandle<Option<String>>,
         last_sync: UseStateHandle<Option<String>>,
         sync_in_flight: UseStateHandle<bool>,
+        relay_copies_by_entry: UseStateHandle<HashMap<String, usize>>,
+        relay_copy_target: usize,
         live_sync: Rc<RefCell<Option<NostrSync>>>,
     ) {
         if *sync_in_flight {
@@ -3230,15 +3412,20 @@ button:disabled { cursor: not-allowed; }
 
         sync_in_flight.set(true);
         sync_state.set(SyncState::Syncing);
+        sync_detail.set(Some("Starting sync".to_string()));
         let timed_out = Rc::new(RefCell::new(false));
         let timeout_flag = timed_out.clone();
         let sync_state_timeout = sync_state.clone();
         let sync_in_flight_timeout = sync_in_flight.clone();
+        let sync_detail_timeout = sync_detail.clone();
         let watchdog = Timeout::new(35_000, move || {
             if *sync_in_flight_timeout {
                 *timeout_flag.borrow_mut() = true;
                 sync_state_timeout.set(SyncState::Error(
                     "sync timeout: approve in Amber, then tap Sync".to_string(),
+                ));
+                sync_detail_timeout.set(Some(
+                    "Timed out waiting for relay/signer responses".to_string(),
                 ));
                 sync_in_flight_timeout.set(false);
             }
@@ -3250,6 +3437,7 @@ button:disabled { cursor: not-allowed; }
                 sync_state.set(SyncState::Error(
                     "set signer credential to enable NIP-17 sync".to_string(),
                 ));
+                sync_detail.set(None);
                 sync_in_flight.set(false);
                 return;
             }
@@ -3261,6 +3449,7 @@ button:disabled { cursor: not-allowed; }
                     Ok(v) => v,
                     Err(err) => {
                         sync_state.set(SyncState::Error(format!("invalid signer: {err}")));
+                        sync_detail.set(Some(format!("Invalid signer: {err}")));
                         sync_in_flight.set(false);
                         return;
                     }
@@ -3273,6 +3462,7 @@ button:disabled { cursor: not-allowed; }
                     }
                     Err(err) => {
                         sync_state.set(SyncState::Error(format!("relay connect failed: {err}")));
+                        sync_detail.set(Some(format!("Relay connect failed: {err}")));
                         sync_in_flight.set(false);
                         return;
                     }
@@ -3280,16 +3470,24 @@ button:disabled { cursor: not-allowed; }
             };
 
             let local = to_map(&local_entries);
-            match sync.sync(&local).await {
-                Ok((merged, _summary)) => {
+            let sync_detail_progress = sync_detail.clone();
+            match sync
+                .sync_with_progress_target(&local, relay_copy_target, move |message| {
+                    sync_detail_progress.set(Some(message));
+                })
+                .await
+            {
+                Ok((merged, summary)) => {
                     if *timed_out.borrow() {
                         return;
                     }
                     let next = from_map(merged);
                     save_entries(&next);
                     entries_state.set(next);
+                    relay_copies_by_entry.set(summary.entry_relay_copies);
                     last_sync.set(Some(Utc::now().to_rfc3339()));
                     sync_state.set(SyncState::Idle);
+                    sync_detail.set(None);
                 }
                 Err(err) => {
                     if *timed_out.borrow() {
@@ -3297,6 +3495,7 @@ button:disabled { cursor: not-allowed; }
                     }
                     *live_sync.borrow_mut() = None;
                     sync_state.set(SyncState::Error(format!("sync failed: {err}")));
+                    sync_detail.set(Some(format!("Sync failed: {err}")));
                 }
             }
             sync_in_flight.set(false);
@@ -3422,6 +3621,33 @@ button:disabled { cursor: not-allowed; }
                 let _ = storage.set_item(RELAYS_STORAGE_KEY, &payload);
             }
         }
+    }
+
+    fn load_relay_copy_target() -> usize {
+        let Some(storage) = local_storage() else {
+            return DEFAULT_RELAY_COPY_TARGET;
+        };
+        let Ok(Some(raw)) = storage.get_item(RELAY_COPY_TARGET_STORAGE_KEY) else {
+            return DEFAULT_RELAY_COPY_TARGET;
+        };
+        raw.trim()
+            .parse::<usize>()
+            .ok()
+            .map(sanitize_relay_copy_target)
+            .unwrap_or(DEFAULT_RELAY_COPY_TARGET)
+    }
+
+    fn save_relay_copy_target(target: usize) {
+        if let Some(storage) = local_storage() {
+            let _ = storage.set_item(
+                RELAY_COPY_TARGET_STORAGE_KEY,
+                sanitize_relay_copy_target(target).to_string().as_str(),
+            );
+        }
+    }
+
+    fn sanitize_relay_copy_target(target: usize) -> usize {
+        target.clamp(1, MAX_SYNC_RELAYS)
     }
 
     fn sanitize_relays(relays: Vec<String>) -> Vec<String> {

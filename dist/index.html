@@ -3,19 +3,26 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#0f1116" />
+    <meta name="mobile-web-app-capable" content="yes" />
     <title>niplock web</title>
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="icon" type="image/svg+xml" href="/icon.svg" />
+    
+    
+    
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
       href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;600;700&family=Space+Grotesk:wght@500;700&display=swap"
       rel="stylesheet"
     />
-  <link rel="modulepreload" href="/niplock-web-c5d63e5eacf6ba91.js" crossorigin="anonymous" integrity="sha384-ulwTrj9VSBQ1JD/8Nwv5Enn2WyVFdXgfR/JpNizVszXAT3jw0SV7dWuhd6DOEqSo"><link rel="preload" href="/niplock-web-c5d63e5eacf6ba91_bg.wasm" crossorigin="anonymous" integrity="sha384-bB4VzvTWIy1z5Od8FAOFWbPBitD36gvnEVxtFEoZ2bWXiNfaxxSL8+V3SeNubHgR" as="fetch" type="application/wasm"></head>
+  <link rel="modulepreload" href="/niplock-web-30cb54904d6bb6a7.js" crossorigin="anonymous" integrity="sha384-mJYxl6PbY13QPhdCvW/nW9wqFB2NYGsxzyUvVoAb3tJC1XuQ3ez66//XMDOO+gbg"><link rel="preload" href="/niplock-web-30cb54904d6bb6a7_bg.wasm" crossorigin="anonymous" integrity="sha384-5ZAtSsHnTEOyOEH2RgIkNZGcwzVMgtebnLbAbKqKSx9DV9pxBJqi1gWCdHJQcvnq" as="fetch" type="application/wasm"></head>
   <body>
     
 <script type="module">
-import init, * as bindings from '/niplock-web-c5d63e5eacf6ba91.js';
-const wasm = await init({ module_or_path: '/niplock-web-c5d63e5eacf6ba91_bg.wasm' });
+import init, * as bindings from '/niplock-web-30cb54904d6bb6a7.js';
+const wasm = await init({ module_or_path: '/niplock-web-30cb54904d6bb6a7_bg.wasm' });
 
 
 window.wasmBindings = bindings;
@@ -24,5 +31,12 @@ window.wasmBindings = bindings;
 dispatchEvent(new CustomEvent("TrunkApplicationStarted", {detail: {wasm}}));
 
 </script>
+    <script>
+      if ("serviceWorker" in navigator) {
+        window.addEventListener("load", function () {
+          navigator.serviceWorker.register("/sw.js").catch(function () {});
+        });
+      }
+    </script>
   </body>
 </html>

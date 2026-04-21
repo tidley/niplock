@@ -16,7 +16,7 @@ use nostr_browser_signer::BrowserSigner;
 
 use crate::model::{PasswordEntry, PasswordEnvelope};
 
-const MIN_RELAY_COPIES: usize = 2;
+pub const DEFAULT_RELAY_COPY_TARGET: usize = 2;
 const PER_RELAY_FETCH_TIMEOUT_SECS: u64 = 5;
 const RELAY_EVENT_FETCH_LIMIT: usize = 100;
 const REMOTE_SIGNER_RELAY_EVENT_FETCH_LIMIT: usize = 24;
@@ -30,6 +30,7 @@ const PREAPPROVED_NIP46_MARKER: &str = "::preapproved";
 pub struct SyncResult {
     pub downloaded: usize,
     pub uploaded: usize,
+    pub entry_relay_copies: HashMap<String, usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -71,11 +72,25 @@ impl NostrSync {
     pub async fn sync_with_progress<F>(
         &self,
         local_entries: &HashMap<String, PasswordEntry>,
+        progress: F,
+    ) -> Result<(HashMap<String, PasswordEntry>, SyncResult)>
+    where
+        F: FnMut(String),
+    {
+        self.sync_with_progress_target(local_entries, DEFAULT_RELAY_COPY_TARGET, progress)
+            .await
+    }
+
+    pub async fn sync_with_progress_target<F>(
+        &self,
+        local_entries: &HashMap<String, PasswordEntry>,
+        relay_copy_target: usize,
         mut progress: F,
     ) -> Result<(HashMap<String, PasswordEntry>, SyncResult)>
     where
         F: FnMut(String),
     {
+        let relay_copy_target = relay_copy_target.max(1);
         let mut remote_latest: HashMap<String, PasswordEntry> = HashMap::new();
         let mut remote_entries_by_relay: HashMap<String, Vec<(String, PasswordEntry)>> =
             HashMap::new();
@@ -98,6 +113,7 @@ impl NostrSync {
             local_entries.len(),
             self.relays.len()
         ));
+        progress(format!("Sync: relay copy target is {relay_copy_target}"));
         if remote_signer {
             progress(format!(
                 "Sync: remote signer mode enabled (limit {fetch_limit} events/relay, max {MAX_REMOTE_UNWRAP_ATTEMPTS_PER_RELAY} unwrap attempts/relay, {signer_operation_timeout_secs}s signer timeout)"
@@ -252,7 +268,7 @@ impl NostrSync {
             let should_upload = match remote_entry {
                 None => true,
                 Some(remote) => {
-                    entry.updated_at > remote.updated_at || relay_copies < MIN_RELAY_COPIES
+                    entry.updated_at > remote.updated_at || relay_copies < relay_copy_target
                 }
             };
 
@@ -264,6 +280,7 @@ impl NostrSync {
                 entry,
                 remote_entries_by_relay.get(&entry.id),
                 &publish_relays,
+                relay_copy_target,
             );
             if target_relays.is_empty() {
                 continue;
@@ -293,17 +310,23 @@ impl NostrSync {
                 Some(Ok(sent)) => {
                     entry.last_event_id = Some(sent.val.to_hex());
                     uploaded += 1;
+                    for relay in &sent.success {
+                        remote_entries_by_relay
+                            .entry(entry.id.clone())
+                            .or_default()
+                            .push((relay.to_string(), entry.clone()));
+                    }
                     progress(format!(
                         "Sync: publish accepted by {} relay(s), failed {}",
                         sent.success.len(),
                         sent.failed.len()
                     ));
-                    if sent.success.len() < MIN_RELAY_COPIES {
+                    if sent.success.len() < relay_copy_target {
                         warn!(
                             entry_id = %entry.id,
                             target_relays = ?target_relays,
                             successful_relays = sent.success.len(),
-                            required_relays = MIN_RELAY_COPIES,
+                            required_relays = relay_copy_target,
                             failed_relays = ?sent.failed,
                             "password entry was not accepted by enough relays"
                         );
@@ -329,11 +352,21 @@ impl NostrSync {
         progress(format!(
             "Sync: complete, downloaded {downloaded}, uploaded {uploaded}"
         ));
+        let entry_relay_copies = merged_entries
+            .iter()
+            .map(|(id, entry)| {
+                (
+                    id.clone(),
+                    count_relay_copies(entry, remote_entries_by_relay.get(id)),
+                )
+            })
+            .collect();
         Ok((
             merged_entries,
             SyncResult {
                 downloaded,
                 uploaded,
+                entry_relay_copies,
             },
         ))
     }
@@ -405,6 +438,7 @@ fn pick_target_relays(
     entry: &PasswordEntry,
     remote: Option<&Vec<(String, PasswordEntry)>>,
     publish_relays: &[String],
+    relay_copy_target: usize,
 ) -> Vec<String> {
     let mut matching_relays = HashSet::new();
     if let Some(remote) = remote {
@@ -415,7 +449,7 @@ fn pick_target_relays(
         }
     }
 
-    let needed = MIN_RELAY_COPIES
+    let needed = relay_copy_target
         .saturating_sub(matching_relays.len())
         .max(1);
     let mut targets = Vec::new();
@@ -527,6 +561,7 @@ struct PreapprovedNostrConnect {
     relays: Vec<RelayUrl>,
     timeout: Duration,
     user_public_key: std::sync::Mutex<Option<PublicKey>>,
+    client: std::sync::Mutex<Option<Client>>,
 }
 
 impl PreapprovedNostrConnect {
@@ -542,13 +577,20 @@ impl PreapprovedNostrConnect {
             relays,
             timeout,
             user_public_key: std::sync::Mutex::new(None),
+            client: std::sync::Mutex::new(None),
         }
     }
 
-    async fn send_request(
-        &self,
-        req: NostrConnectRequest,
-    ) -> Result<NostrConnectResponseResult, SignerError> {
+    async fn client(&self) -> Result<Client, SignerError> {
+        if let Some(client) = self
+            .client
+            .lock()
+            .expect("nostr connect client cache poisoned")
+            .clone()
+        {
+            return Ok(client);
+        }
+
         let client = Client::new(self.app_keys.clone());
         for relay in &self.relays {
             client
@@ -559,17 +601,18 @@ impl PreapprovedNostrConnect {
         client.connect().await;
         client.wait_for_connection(Duration::from_secs(5)).await;
 
-        let filter = Filter::new()
-            .kind(Kind::NostrConnect)
-            .author(self.remote_signer_public_key)
-            .pubkey(self.app_keys.public_key())
-            .limit(0);
-        let mut notifications = client.notifications();
-        client
-            .subscribe(filter, None)
-            .await
-            .map_err(SignerError::backend)?;
+        *self
+            .client
+            .lock()
+            .expect("nostr connect client cache poisoned") = Some(client.clone());
+        Ok(client)
+    }
 
+    async fn send_request(
+        &self,
+        req: NostrConnectRequest,
+    ) -> Result<NostrConnectResponseResult, SignerError> {
+        let client = self.client().await?;
         let method = req.method();
         let message = NostrConnectMessage::request(&req);
         let request_id = message.id().to_string();
@@ -577,10 +620,23 @@ impl PreapprovedNostrConnect {
             EventBuilder::nostr_connect(&self.app_keys, self.remote_signer_public_key, message)
                 .and_then(|builder| builder.sign_with_keys(&self.app_keys))
                 .map_err(SignerError::backend)?;
-        client
-            .send_event(&event)
+
+        let filter = Filter::new()
+            .kind(Kind::NostrConnect)
+            .author(self.remote_signer_public_key)
+            .pubkey(self.app_keys.public_key())
+            .limit(0);
+        let mut notifications = client.notifications();
+        let subscription = client
+            .subscribe(filter, None)
             .await
             .map_err(SignerError::backend)?;
+        let subscription_id = subscription.val;
+
+        if let Err(err) = client.send_event(&event).await {
+            client.unsubscribe(&subscription_id).await;
+            return Err(SignerError::backend(err));
+        }
 
         let result = time::timeout(Some(self.timeout), async {
             while let Ok(notification) = notifications.recv().await {
@@ -628,7 +684,7 @@ impl PreapprovedNostrConnect {
         .await
         .unwrap_or_else(|| Err(SignerError::from("Amber request timed out")));
 
-        client.shutdown().await;
+        client.unsubscribe(&subscription_id).await;
         result
     }
 }
